@@ -91,7 +91,7 @@ def normalize_project_name(raw: str) -> str:
     return name
 
 
-def _as_list(value) -> List[str]:
+def _as_list(value) -> List[str]:  # noqa: ANN001
     if value is None:
         return []
     if isinstance(value, str):
@@ -99,7 +99,7 @@ def _as_list(value) -> List[str]:
     return [str(v) for v in value]
 
 
-def _as_command(value) -> Optional[List[str]]:
+def _as_command(value) -> Optional[List[str]]:  # noqa: ANN001
     if value is None:
         return None
     if isinstance(value, str):
@@ -107,7 +107,7 @@ def _as_command(value) -> Optional[List[str]]:
     return [str(v) for v in value]
 
 
-def _as_mapping(value, what: str) -> Dict[str, str]:
+def _as_mapping(value, what: str) -> Dict[str, str]:  # noqa: ANN001
     """Accept both list ("K=V") and mapping syntax for labels/build args."""
     result: Dict[str, str] = {}
     if value is None:
@@ -124,7 +124,7 @@ def _as_mapping(value, what: str) -> Dict[str, str]:
     raise ComposeError(f"{what}: expected list or mapping, got {type(value).__name__}")
 
 
-def _as_environment(value) -> Dict[str, Optional[str]]:
+def _as_environment(value) -> Dict[str, Optional[str]]:  # noqa: ANN001
     result: Dict[str, Optional[str]] = {}
     if value is None:
         return result
@@ -140,7 +140,7 @@ def _as_environment(value) -> Dict[str, Optional[str]]:
     raise ComposeError(f"environment: expected list or mapping, got {type(value).__name__}")
 
 
-def parse_port(spec) -> List[PortMapping]:
+def parse_port(spec) -> List[PortMapping]:  # noqa: ANN001
     if isinstance(spec, dict):  # long syntax
         target = int(spec["target"])
         published = spec.get("published")
@@ -214,7 +214,7 @@ def _is_host_path(source: str) -> bool:
     )
 
 
-def parse_volume(spec, project_dir: str) -> VolumeMount:
+def parse_volume(spec, project_dir: str) -> VolumeMount:  # noqa: ANN001
     if isinstance(spec, dict):  # long syntax
         vtype = spec.get("type", "volume")
         source = spec.get("source")
@@ -252,7 +252,7 @@ def _resolve_bind_source(source: str, project_dir: str) -> str:
     return source
 
 
-def _parse_depends_on(value) -> Tuple[List[str], List[str]]:
+def _parse_depends_on(value) -> Tuple[List[str], List[str]]:  # noqa: ANN001
     warnings: List[str] = []
     if value is None:
         return [], warnings
@@ -271,7 +271,7 @@ def _parse_depends_on(value) -> Tuple[List[str], List[str]]:
     raise ComposeError("depends_on: expected list or mapping")
 
 
-def _parse_build(value, project_dir: str) -> BuildConfig:
+def _parse_build(value, project_dir: str) -> BuildConfig:  # noqa: ANN001
     if isinstance(value, str):
         return BuildConfig(context=_resolve_bind_source(value, project_dir))
     context = _resolve_bind_source(value.get("context", "."), project_dir)
