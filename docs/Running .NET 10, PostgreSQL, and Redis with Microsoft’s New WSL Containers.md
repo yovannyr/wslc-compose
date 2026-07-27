@@ -1443,19 +1443,149 @@ An application should not retry forever when configuration, credentials, or netw
 
 # Benefits and Trade-Offs
 
-| Area | WSLC advantage | Current trade-off |
-|---|---|---|
-| Installation | Integrated with an updated WSL installation | Preview version may be required |
-| Windows integration | First-party Microsoft platform | Windows-specific |
-| Container CLI | Familiar runtime concepts | Younger ecosystem |
-| .NET integration | Native C# API | API may still evolve |
-| Images | Standard Linux container images | Compatibility still requires testing |
-| Networking | Networks and published ports | Behavior may differ from Docker |
-| Volumes | Persistent runtime storage | Advanced mount scenarios may be limited |
-| Compose | Available through `wslc-compose` | No native Compose support yet |
-| Transparency | `--dry-run` exposes generated commands | Adapter cannot add unsupported runtime features |
-| Tooling | CLI and API automation | No mature Docker Desktop-style UI |
-| Production use | Promising architecture | Preview status requires caution |
+WSLC is promising, but it is not a simple “better or worse” alternative to Docker Desktop. Its value depends heavily on the project, the team, and the required feature set.
+
+## Where WSLC Is Strong
+
+### Native Windows and WSL integration
+
+WSLC is part of Microsoft’s WSL ecosystem. That makes it especially interesting for teams that already use Windows, WSL, PowerShell, Visual Studio, and Microsoft development tooling.
+
+**Benefit:** fewer separate platform layers and a more direct integration with Windows.
+
+### First-party Microsoft runtime
+
+The runtime, CLI, and API come from Microsoft rather than from a third-party desktop container platform.
+
+**Benefit:** potential integration with Windows security, enterprise policies, GPU support, networking, and management tooling.
+
+### Programmable .NET API
+
+The `Microsoft.WSL.Containers` package allows Windows applications to create and manage Linux containers from C#.
+
+**Benefit:** useful for developer tools, integration-test platforms, build systems, desktop applications, and isolated Linux workloads.
+
+### Familiar container model
+
+WSLC still uses concepts developers already know:
+
+- images
+- containers
+- ports
+- networks
+- volumes
+- registries
+- logs
+- processes
+
+**Benefit:** developers do not need to learn a completely new operational model.
+
+### No separate Compose-specific runtime
+
+`wslc-compose` does not introduce another daemon or container engine. It translates Compose concepts into normal `wslc` commands.
+
+**Benefit:** the runtime remains transparent and easier to inspect.
+
+### Reuse of existing Compose files
+
+Projects can keep using a familiar `compose.yaml` structure.
+
+**Benefit:** less custom scripting and an easier migration path for existing applications.
+
+---
+
+## Where the Current Trade-Offs Are
+
+### Preview maturity
+
+WSLC is still an emerging platform.
+
+**Trade-off:** CLI behavior, APIs, compatibility, and documentation may still change.
+
+### No native Compose support
+
+Microsoft’s runtime currently does not provide a built-in Compose workflow.
+
+**Trade-off:** multi-container projects need an additional layer such as `wslc-compose`.
+
+### Incomplete Compose compatibility
+
+Some Compose features may not map directly to WSLC.
+
+Examples include:
+
+- advanced health checks
+- restart policies
+- secrets
+- configs
+- privileged containers
+- device mappings
+- additional Linux capabilities
+- complex network topologies
+- custom logging drivers
+
+**Trade-off:** existing Compose files may require adjustments.
+
+### Smaller ecosystem
+
+Docker has a much larger ecosystem of documentation, integrations, extensions, and troubleshooting knowledge.
+
+**Trade-off:** WSLC users should expect fewer examples and less mature third-party support.
+
+### No mature desktop UI
+
+WSLC is currently focused on CLI and API usage.
+
+**Trade-off:** teams that depend on graphical container management may find the experience less convenient.
+
+### Possible differences from CI and production
+
+Many build pipelines and production environments still use Docker or another OCI-compatible runtime.
+
+**Trade-off:** a stack that works locally with WSLC must still be validated against the actual deployment runtime.
+
+### Windows-specific platform
+
+WSLC is designed for Windows and WSL.
+
+**Trade-off:** mixed teams using macOS, Linux, and Windows may still need another common development baseline.
+
+---
+
+## Quick Comparison
+
+### Choose WSLC when you value:
+
+- deep Windows and WSL integration
+- a first-party Microsoft runtime
+- programmatic container control from C#
+- a lightweight CLI-oriented workflow
+- experimentation with Windows-native container tooling
+- standard multi-container development through `wslc-compose`
+
+### Be cautious when you require:
+
+- complete Docker Compose compatibility
+- mature restart and health-check behavior
+- advanced container privileges
+- broad third-party integrations
+- graphical management
+- identical behavior across Windows, macOS, and Linux
+- production-grade stability without preview risk
+
+---
+
+## Bottom Line
+
+WSLC offers a compelling new direction for Windows-based container development.
+
+Its strongest advantages are the native WSL integration, the Microsoft-supported runtime, and the programmable .NET API.
+
+Its biggest weaknesses are still maturity, missing native Compose support, and incomplete compatibility with advanced Compose features.
+
+That is exactly where `wslc-compose` becomes useful.
+
+It preserves the familiar Compose workflow while delegating the actual container execution to Microsoft’s runtime. It does not eliminate every limitation, but it makes WSLC practical for realistic multi-container development today.
 
 ---
 
