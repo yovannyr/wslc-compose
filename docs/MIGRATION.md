@@ -61,7 +61,7 @@ this to map each container to a compose service and to know what to stop in step
 ## Step 2 — Install wslc-compose and prepare the compose file
 
 ```console
-curl -fsSL https://raw.githubusercontent.com/bacarndiaye/wslc-compose/main/install.sh | sh
+curl -fsSL https://raw.githubusercontent.com/yovannyr/wslc-compose/main/install.sh | sh
 ```
 
 If you already have a `docker-compose.yml` from Docker/Podman days, use it **unchanged**.

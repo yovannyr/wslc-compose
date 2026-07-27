@@ -2,14 +2,14 @@
 # wslc-compose installer — gives you `wslc compose ...` (docker/podman style)
 # and `wslc-compose ...`, even on distros without pip/venv/pipx.
 #
-#   curl -fsSL https://raw.githubusercontent.com/bacarndiaye/wslc-compose/main/install.sh | sh
+#   curl -fsSL https://raw.githubusercontent.com/yovannyr/wslc-compose/main/install.sh | sh
 #
 # Environment:
 #   WSLC_COMPOSE_SOURCE  package to install (default: the GitHub repo;
 #                        set it to a local checkout path to install from source)
 set -eu
 
-SOURCE="${WSLC_COMPOSE_SOURCE:-git+https://github.com/bacarndiaye/wslc-compose}"
+SOURCE="${WSLC_COMPOSE_SOURCE:-git+https://github.com/yovannyr/wslc-compose}"
 
 say() { printf '\033[1;34m==>\033[0m %s\n' "$*"; }
 fail() { printf '\033[1;31merror:\033[0m %s\n' "$*" >&2; exit 1; }

@@ -1,6 +1,6 @@
 # wslc-compose
 
-[![CI](https://github.com/bacarndiaye/wslc-compose/actions/workflows/ci.yml/badge.svg)](https://github.com/bacarndiaye/wslc-compose/actions/workflows/ci.yml)
+[![CI](https://github.com/yovannyr/wslc-compose/actions/workflows/ci.yml/badge.svg)](https://github.com/yovannyr/wslc-compose/actions/workflows/ci.yml)
 [![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg)](LICENSE)
 ![Python](https://img.shields.io/badge/python-3.9%2B-blue)
 
@@ -82,7 +82,7 @@ Works even on WSL distros without `pip`, `venv` or `pipx` — it bootstraps a st
 [uv](https://docs.astral.sh/uv/) if no Python package manager is found:
 
 ```console
-curl -fsSL https://raw.githubusercontent.com/bacarndiaye/wslc-compose/main/install.sh | sh
+curl -fsSL https://raw.githubusercontent.com/yovannyr/wslc-compose/main/install.sh | sh
 ```
 
 Commands are installed into `~/.local/bin` (make sure it is on your `PATH`).
@@ -90,17 +90,17 @@ Commands are installed into `~/.local/bin` (make sure it is on your `PATH`).
 ### With an existing package manager
 
 ```console
-pipx install git+https://github.com/bacarndiaye/wslc-compose
+pipx install git+https://github.com/yovannyr/wslc-compose
 # or
-uv tool install --from git+https://github.com/bacarndiaye/wslc-compose wslc-compose
+uv tool install --from git+https://github.com/yovannyr/wslc-compose wslc-compose
 # or
-pip install --user git+https://github.com/bacarndiaye/wslc-compose
+pip install --user git+https://github.com/yovannyr/wslc-compose
 ```
 
 ### From a local checkout
 
 ```console
-git clone https://github.com/bacarndiaye/wslc-compose
+git clone https://github.com/yovannyr/wslc-compose
 cd wslc-compose
 WSLC_COMPOSE_SOURCE=$PWD sh install.sh     # or: pip install -e .
 ```
@@ -510,7 +510,7 @@ install.sh          curl-able installer, bootstraps uv when pip/pipx are missing
 ## Development
 
 ```console
-git clone https://github.com/bacarndiaye/wslc-compose
+git clone https://github.com/yovannyr/wslc-compose
 cd wslc-compose
 pip install -e . pytest ruff      # or the uv equivalent
 pytest                            # unit tests, no wslc required
@@ -525,4 +525,4 @@ since the CLI surface is still evolving.
 
 ## License
 
-[MIT](LICENSE) © Bacar Ndiaye
+[MIT](LICENSE) © Yovanny Rodríguez, 2026. See the LICENSE file for details.

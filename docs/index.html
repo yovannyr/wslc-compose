@@ -225,8 +225,8 @@
       <a href="#how" class="opt">How it works</a>
       <a href="#features" class="opt">Features</a>
       <a href="#compat" class="opt">Compatibility</a>
-      <a href="https://github.com/bacarndiaye/wslc-compose/blob/main/docs/MIGRATION.md">Migration</a>
-      <a href="https://github.com/bacarndiaye/wslc-compose">GitHub</a>
+      <a href="https://github.com/yovannyr/wslc-compose/blob/main/docs/MIGRATION.md">Migration</a>
+      <a href="https://github.com/yovannyr/wslc-compose">GitHub</a>
     </nav>
   </div>
 </header>
@@ -243,12 +243,12 @@
     <strong>compose.yaml you already use</strong> with Docker or Podman. No daemon, no lock-in.
   </p>
   <div class="install">
-    <code><span class="p">$</span> curl -fsSL https://raw.githubusercontent.com/bacarndiaye/wslc-compose/main/install.sh | sh</code>
-    <button onclick="navigator.clipboard.writeText('curl -fsSL https://raw.githubusercontent.com/bacarndiaye/wslc-compose/main/install.sh | sh').then(()=>{this.textContent='Copied!';setTimeout(()=>this.textContent='Copy',1500)})">Copy</button>
+    <code><span class="p">$</span> curl -fsSL https://raw.githubusercontent.com/yovannyr/wslc-compose/main/install.sh | sh</code>
+    <button onclick="navigator.clipboard.writeText('curl -fsSL https://raw.githubusercontent.com/yovannyr/wslc-compose/main/install.sh | sh').then(()=>{this.textContent='Copied!';setTimeout(()=>this.textContent='Copy',1500)})">Copy</button>
   </div>
   <div class="cta-row">
-    <a class="btn primary" href="https://github.com/bacarndiaye/wslc-compose#quick-start">Get started</a>
-    <a class="btn ghost" href="https://github.com/bacarndiaye/wslc-compose/blob/main/docs/MIGRATION.md">Migrate an existing wslc setup</a>
+    <a class="btn primary" href="https://github.com/yovannyr/wslc-compose#quick-start">Get started</a>
+    <a class="btn ghost" href="https://github.com/yovannyr/wslc-compose/blob/main/docs/MIGRATION.md">Migrate an existing wslc setup</a>
   </div>
 </div>
 
@@ -337,7 +337,7 @@ my-project-web-1   web      nginx:alpine  running  <span class="hl">0.0.0.0:8080
 <section id="compat">
   <div class="wrap">
     <h2>Compose file compatibility</h2>
-    <p class="sub">A sample of the mapping — the <a href="https://github.com/bacarndiaye/wslc-compose#compose-file-support">full table is in the README</a>. Keys wslc can't honor yet are accepted with a warning, never a failure.</p>
+    <p class="sub">A sample of the mapping — the <a href="https://github.com/yovannyr/wslc-compose#compose-file-support">full table is in the README</a>. Keys wslc can't honor yet are accepted with a warning, never a failure.</p>
     <div class="tbl-scroll">
       <table>
         <tr><th>Compose key</th><th>Handled as</th></tr>
@@ -352,7 +352,7 @@ my-project-web-1   web      nginx:alpine  running  <span class="hl">0.0.0.0:8080
     </div>
     <div class="callout">
       <p><strong>Already running containers with raw <code>wslc run</code>?</strong>
-      The <a href="https://github.com/bacarndiaye/wslc-compose/blob/main/docs/MIGRATION.md">migration guide</a>
+      The <a href="https://github.com/yovannyr/wslc-compose/blob/main/docs/MIGRATION.md">migration guide</a>
       covers the move end to end: image retagging instead of rebuilds, port handover, verification from the
       Windows loopback, rollback — plus a recovery cheat sheet for the preview's sharp edges.</p>
     </div>
@@ -362,12 +362,12 @@ my-project-web-1   web      nginx:alpine  running  <span class="hl">0.0.0.0:8080
 <footer>
   <div class="wrap">
     <div class="links">
-      <a href="https://github.com/bacarndiaye/wslc-compose">GitHub</a>
-      <a href="https://github.com/bacarndiaye/wslc-compose#command-reference">Docs</a>
-      <a href="https://github.com/bacarndiaye/wslc-compose/blob/main/docs/MIGRATION.md">Migration guide</a>
-      <a href="https://github.com/bacarndiaye/wslc-compose/issues">Issues</a>
+      <a href="https://github.com/yovannyr/wslc-compose">GitHub</a>
+      <a href="https://github.com/yovannyr/wslc-compose#command-reference">Docs</a>
+      <a href="https://github.com/yovannyr/wslc-compose/blob/main/docs/MIGRATION.md">Migration guide</a>
+      <a href="https://github.com/yovannyr/wslc-compose/issues">Issues</a>
     </div>
-    <div>MIT © Bacar Ndiaye — not affiliated with Microsoft. <em>wslc</em> is part of the
+    <div>MIT © Yovanny Rodríguez, 2026 — not affiliated with Microsoft. <em>wslc</em> is part of the
     <a href="https://learn.microsoft.com/windows/wsl/wsl-container">WSL container preview</a>.</div>
   </div>
 </footer>
