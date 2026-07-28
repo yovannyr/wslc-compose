@@ -25,7 +25,7 @@ _VAR_RE = re.compile(
 
 
 def interpolate(value: str, env: Mapping[str, str]) -> str:
-    def repl(m: re.Match) -> str:
+    def repl(m: re.Match) -> str:  # noqa: ANN001
         if m.group("escaped"):
             return "$"
         name = m.group("named") or m.group("braced")
@@ -51,7 +51,7 @@ def interpolate(value: str, env: Mapping[str, str]) -> str:
     return _VAR_RE.sub(repl, value)
 
 
-def interpolate_tree(node, env: Mapping[str, str]):
+def interpolate_tree(node, env: Mapping[str, str]):  # noqa: ANN001
     """Recursively interpolate every string in a parsed YAML tree."""
     if isinstance(node, str):
         return interpolate(node, env)
