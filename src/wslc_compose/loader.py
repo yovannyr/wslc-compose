@@ -15,6 +15,8 @@ from wslc_compose.model import (
     Network,
     PortMapping,
     Project,
+    Secret,
+    SecretMount,
     Service,
     Volume,
     VolumeMount,
@@ -36,7 +38,6 @@ UNSUPPORTED_KEYS = {
     "devices": "device mapping is not supported by wslc (see 'gpus' for GPUs)",
     "extra_hosts": "extra_hosts is not supported by wslc",
     "sysctls": "sysctls are not supported by wslc",
-    "secrets": "secrets are not supported; use environment/env_file instead",
     "configs": "configs are not supported; use bind mounts instead",
     "init": "init is not supported by wslc",
     "pid": "pid mode is not supported by wslc",
@@ -252,6 +253,113 @@ def _resolve_bind_source(source: str, project_dir: str) -> str:
     return source
 
 
+def _parse_secret_definitions(value, project_dir: str) -> Dict[str, Secret]:
+    if value is None:
+        return {}
+    if not isinstance(value, dict):
+        raise ComposeError(f"secrets: expected mapping, got {type(value).__name__}")
+
+    result: Dict[str, Secret] = {}
+    for raw_key, cfg in value.items():
+        key = str(raw_key)
+        if not isinstance(cfg, dict):
+            raise ComposeError(
+                f"secret {key!r}: expected a mapping with a 'file' source"
+            )
+        if cfg.get("external"):
+            raise ComposeError(
+                f"secret {key!r}: external secrets are not supported by wslc; "
+                "use a file-backed secret"
+            )
+        if "environment" in cfg:
+            raise ComposeError(
+                f"secret {key!r}: environment-backed secrets are not supported by "
+                "wslc; write the value to a protected host file and use 'file'"
+            )
+        if not cfg.get("file"):
+            raise ComposeError(
+                f"secret {key!r}: only file-backed secrets are supported by wslc"
+            )
+
+        source = _resolve_bind_source(str(cfg["file"]), project_dir)
+        is_windows_path_from_wsl = os.name != "nt" and (
+            bool(_WIN_PATH_RE.match(source)) or source.startswith("\\\\")
+        )
+        if not is_windows_path_from_wsl and not os.path.isfile(source):
+            raise ComposeError(f"secret {key!r}: file not found: {source}")
+        result[key] = Secret(key=key, file=source)
+    return result
+
+
+def _parse_service_secrets(
+    value,
+    definitions: Dict[str, Secret],
+    service_name: str,
+) -> Tuple[List[SecretMount], List[str]]:
+    if value is None:
+        return [], []
+    if not isinstance(value, list):
+        raise ComposeError(
+            f"{service_name}: secrets: expected list, got {type(value).__name__}"
+        )
+
+    mounts: List[SecretMount] = []
+    warnings: List[str] = []
+    targets = set()
+    for spec in value:
+        if isinstance(spec, str):
+            source = spec
+            target = spec
+            ignored = []
+        elif isinstance(spec, dict):
+            if not spec.get("source"):
+                raise ComposeError(
+                    f"{service_name}: secret entry missing source: {spec!r}"
+                )
+            source = str(spec["source"])
+            target = str(spec.get("target") or source)
+            ignored = [key for key in ("uid", "gid", "mode") if key in spec]
+        else:
+            raise ComposeError(
+                f"{service_name}: invalid secret entry: expected string or mapping"
+            )
+
+        definition = definitions.get(source)
+        if definition is None:
+            raise ComposeError(
+                f"service {service_name!r} references undefined secret {source!r}"
+            )
+
+        if target.startswith("/"):
+            container_target = target
+        else:
+            if target in ("", ".", "..") or "/" in target or "\\" in target:
+                raise ComposeError(
+                    f"{service_name}: secret {source!r} has invalid target {target!r}; "
+                    "use a filename or an absolute container path"
+                )
+            container_target = f"/run/secrets/{target}"
+
+        if container_target in targets:
+            raise ComposeError(
+                f"{service_name}: multiple secrets target {container_target!r}"
+            )
+        targets.add(container_target)
+        mounts.append(
+            SecretMount(
+                source=source,
+                file=definition.file,
+                target=container_target,
+            )
+        )
+        if ignored:
+            warnings.append(
+                f"secret {source!r}: {', '.join(ignored)} cannot be enforced by "
+                "wslc file mounts and will be ignored"
+            )
+    return mounts, warnings
+
+
 def _parse_depends_on(value) -> Tuple[List[str], List[str]]:
     warnings: List[str] = []
     if value is None:
@@ -271,9 +379,14 @@ def _parse_depends_on(value) -> Tuple[List[str], List[str]]:
     raise ComposeError("depends_on: expected list or mapping")
 
 
-def _parse_build(value, project_dir: str) -> BuildConfig:
+def _parse_build(value, project_dir: str, service_name: str) -> BuildConfig:
     if isinstance(value, str):
         return BuildConfig(context=_resolve_bind_source(value, project_dir))
+    if "secrets" in value:
+        raise ComposeError(
+            f"{service_name}: build.secrets are not supported because "
+            "'wslc build' has no --secret option; do not pass credentials as build args"
+        )
     context = _resolve_bind_source(value.get("context", "."), project_dir)
     return BuildConfig(
         context=context,
@@ -325,6 +438,8 @@ def load_project(
         vol_name = cfg.get("name") or (key if external else f"{name}_{key}")
         project.volumes[key] = Volume(key=key, name=vol_name, external=external)
 
+    project.secrets = _parse_secret_definitions(raw.get("secrets"), project_dir)
+
     # --- services ----------------------------------------------------------
     for svc_name, cfg in (raw.get("services") or {}).items():
         if cfg is None:
@@ -337,7 +452,7 @@ def load_project(
 
         svc.image = cfg.get("image")
         if "build" in cfg:
-            svc.build = _parse_build(cfg["build"], project_dir)
+            svc.build = _parse_build(cfg["build"], project_dir, str(svc_name))
         if not svc.image and not svc.build:
             raise ComposeError(f"service {svc_name!r} needs 'image' or 'build'")
 
@@ -353,6 +468,16 @@ def load_project(
             svc.ports.extend(parse_port(spec))
         for spec in cfg.get("volumes") or []:
             svc.volumes.append(parse_volume(spec, project_dir))
+        svc.secrets, secret_warnings = _parse_service_secrets(
+            cfg.get("secrets"), project.secrets, str(svc_name)
+        )
+        project.warnings.extend(f"{svc_name}: {w}" for w in secret_warnings)
+        volume_targets = {mount.target for mount in svc.volumes}
+        for secret in svc.secrets:
+            if secret.target in volume_targets:
+                raise ComposeError(
+                    f"{svc_name}: secret target {secret.target!r} conflicts with a volume"
+                )
         svc.tmpfs = _as_list(cfg.get("tmpfs"))
 
         # networks: list or mapping (with aliases); default network otherwise

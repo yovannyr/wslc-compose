@@ -49,6 +49,8 @@ def run_args(
         if mount.read_only:
             spec += ":ro"
         args += ["-v", spec]
+    for secret in service.secrets:
+        args += ["-v", f"{mapper(secret.file)}:{secret.target}:ro"]
     for target in service.tmpfs:
         args += ["--tmpfs", target]
 

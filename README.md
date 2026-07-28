@@ -251,6 +251,7 @@ Show the wslc-compose and wslc versions.
 | `environment` (list & map), `env_file` | `-e`, `--env-file` |
 | `ports` (short & long syntax, `ip:host:container`, `/udp`, ranges `8000-8005`) | `-p` |
 | `volumes` — named volumes | `wslc volume create` + `-v name:/path` |
+| `secrets` (file source; short & long service syntax) | read-only file mount at `/run/secrets/<name>` or `target` |
 | `volumes` — bind mounts (`./rel`, `/abs`, `~`, `E:\win\path`), `:ro` | `-v` with [path translation](#volumes-and-path-translation) |
 | `tmpfs` (top-level list or `type: tmpfs`) | `--tmpfs` |
 | `networks` incl. `aliases`, `external: true`, custom `name:` | `wslc network create`, `--network`, `--network-alias` |
@@ -268,12 +269,13 @@ Show the wslc-compose and wslc versions.
 
 Keys that wslc cannot honor yet are **accepted and reported as a warning** instead of
 failing, so your existing files keep working: `restart`, `healthcheck`, `privileged`,
-`cap_add`/`cap_drop`, `devices`, `extra_hosts`, `sysctls`, `secrets`, `configs`, `init`,
+`cap_add`/`cap_drop`, `devices`, `extra_hosts`, `sysctls`, `configs`, `init`,
 `pid`, `ipc`, `read_only`, `security_opt`, `logging`.
 
 Rejected with an explicit error (no silent surprise): anonymous volumes
 (`- /data` without a source), references to undeclared networks/volumes, circular
-`depends_on`, scaling a service that sets `container_name`.
+`depends_on`, scaling a service that sets `container_name`, unsupported secret
+sources, and build-time secrets.
 
 ## Variable interpolation
 
@@ -355,6 +357,62 @@ services on the next `up`.
   drive (`/mnt/c`, `/mnt/e`, ...).
 - `tmpfs` mounts map to `--tmpfs`.
 
+## Secrets
+
+File-backed runtime secrets use standard Compose syntax. Each secret is exposed only
+to services that explicitly request it and is mounted read-only. Short syntax mounts
+to `/run/secrets/<name>`:
+
+```yaml
+services:
+  restore:
+    image: mcr.microsoft.com/dotnet/sdk:10.0
+    working_dir: /src
+    volumes:
+      - .:/src
+    secrets:
+      - nuget_config
+    command:
+      - dotnet
+      - restore
+      - --configfile
+      - /run/secrets/nuget_config
+
+secrets:
+  nuget_config:
+    file: C:/Users/me/.nuget/private.NuGet.Config
+```
+
+Long syntax can choose a filename under `/run/secrets` or an absolute container path:
+
+```yaml
+services:
+  restore:
+    image: mcr.microsoft.com/dotnet/sdk:10.0
+    secrets:
+      - source: nuget_config
+        target: /root/.nuget/NuGet.Config
+
+secrets:
+  nuget_config:
+    file: ./private.NuGet.Config
+```
+
+Keep secret files outside source control and restrict their host permissions. Secret
+contents are never copied into the normalized model, labels, config hash, or generated
+command line; only the host path is passed to `wslc -v`.
+
+Current boundaries:
+
+- `file:` sources are supported; `environment:` and `external:` sources fail clearly.
+- `uid`, `gid`, and `mode` are accepted with a warning because wslc bind mounts cannot
+  enforce them.
+- `build.secrets` fails clearly. The current `wslc build` has no `--secret` option, so
+  a Dockerfile `RUN dotnet restore` cannot receive credentials safely. Do not replace
+  build secrets with `build.args`; use a runtime restore container or a builder with
+  native BuildKit secret support.
+- Every secret is a mount and counts toward the current wslc session mount limit.
+
 ## Known wslc preview limitations
 
 `wslc` is a public preview; `wslc-compose` warns at load time rather than failing:
@@ -384,7 +442,7 @@ services on the next `up`.
 - **Published ports bind the Windows loopback**, not the distro's: test them from
   the Windows side (browser, `powershell.exe Invoke-WebRequest`), not with a `curl
   localhost` inside WSL.
-- `privileged`, `cap_add`, `devices`, `sysctls`, `secrets`, `configs`, `extra_hosts`,
+- `privileged`, `cap_add`, `devices`, `sysctls`, `configs`, `extra_hosts`,
   `logging` — not configurable with wslc; ignored with a warning.
 
 When wslc gains native Compose support ([#40948](https://github.com/microsoft/WSL/issues/40948))

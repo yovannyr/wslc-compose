@@ -28,6 +28,23 @@ class VolumeMount:
 
 
 @dataclass
+class Secret:
+    """A top-level, file-backed Compose secret."""
+
+    key: str
+    file: str
+
+
+@dataclass
+class SecretMount:
+    """A file-backed secret granted to one service."""
+
+    source: str  # top-level secret key
+    file: str  # resolved host path; never the secret contents
+    target: str  # absolute path inside the container
+
+
+@dataclass
 class PortMapping:
     target: int
     published: Optional[str] = None  # may be None (random), a port, or "ip:port"
@@ -54,6 +71,7 @@ class Service:
     env_files: List[str] = field(default_factory=list)
     ports: List[PortMapping] = field(default_factory=list)
     volumes: List[VolumeMount] = field(default_factory=list)
+    secrets: List[SecretMount] = field(default_factory=list)
     tmpfs: List[str] = field(default_factory=list)
     networks: List[str] = field(default_factory=list)  # project-resolved network names
     network_aliases: Dict[str, List[str]] = field(default_factory=dict)
@@ -104,6 +122,7 @@ class Project:
     services: Dict[str, Service] = field(default_factory=dict)
     networks: Dict[str, Network] = field(default_factory=dict)
     volumes: Dict[str, Volume] = field(default_factory=dict)
+    secrets: Dict[str, Secret] = field(default_factory=dict)
     warnings: List[str] = field(default_factory=list)
 
     def container_name(self, service: Service, index: int = 1) -> str:
