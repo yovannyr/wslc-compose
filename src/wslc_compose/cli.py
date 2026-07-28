@@ -18,8 +18,9 @@ from wslc_compose import (
     LABEL_INDEX,
     LABEL_SERVICE,
     __version__,
+    engine,
+    flags,
 )
-from wslc_compose import engine, flags
 from wslc_compose.engine import WslcError
 from wslc_compose.loader import ComposeError, find_compose_file, load_project
 from wslc_compose.model import Project, Service

@@ -36,5 +36,8 @@ packages = ["src/wslc_compose"]
 line-length = 100
 target-version = "py39"
 
+[tool.ruff.lint]
+ignore = ["UP006", "UP035", "UP045"]
+
 [tool.pytest.ini_options]
 testpaths = ["tests"]
