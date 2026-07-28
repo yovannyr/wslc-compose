@@ -99,7 +99,7 @@ def run(
     if dry_run:
         print("+ " + " ".join(argv))
         return subprocess.CompletedProcess(argv, 0, "", "")
-    proc = subprocess.run(argv, capture_output=capture, text=capture)
+    proc = subprocess.run(argv, capture_output=capture, text=capture, check=False)
     if check and proc.returncode != 0:
         detail = (proc.stderr or "").strip() if capture else ""
         raise WslcError(

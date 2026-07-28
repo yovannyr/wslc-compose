@@ -8,7 +8,7 @@ def test_compose_dispatch():
 
 
 def test_bare_compose():
-    compose, passthrough = split_argv(["compose"])
+    compose, _passthrough = split_argv(["compose"])
     assert compose == []
 
 
