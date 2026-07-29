@@ -52,11 +52,11 @@ def test_one_off_resource_setup_uses_unique_suffix(tmp_path, monkeypatch):
     project = _load_anonymous_project(tmp_path)
     service = project.services["app"]
     created = []
-    monkeypatch.setattr(cli.engine, "ensure_network", lambda name, dry_run=False: False)
+    monkeypatch.setattr(cli.engine, "ensure_network", lambda name, **kwargs: False)
     monkeypatch.setattr(
         cli.engine,
         "ensure_volume",
-        lambda name, dry_run=False: created.append(name) or True,
+        lambda name, **kwargs: created.append(name) or True,
     )
 
     cli._ensure_service_resources(project, service, False, "task1234")

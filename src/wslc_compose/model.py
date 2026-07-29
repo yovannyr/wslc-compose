@@ -153,6 +153,9 @@ class Service:
 class Network:
     key: str  # name used in the compose file
     name: str  # actual wslc network name
+    driver: Optional[str] = None
+    driver_opts: Dict[str, str] = field(default_factory=dict)
+    labels: Dict[str, str] = field(default_factory=dict)
     external: bool = False
 
 
@@ -160,6 +163,9 @@ class Network:
 class Volume:
     key: str
     name: str
+    driver: Optional[str] = None
+    driver_opts: Dict[str, str] = field(default_factory=dict)
+    labels: Dict[str, str] = field(default_factory=dict)
     external: bool = False
 
 

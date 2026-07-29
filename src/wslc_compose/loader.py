@@ -878,14 +878,28 @@ def load_project(
         cfg = cfg or {}
         external = bool(cfg.get("external", False))
         net_name = cfg.get("name") or (key if external else f"{name}_{key}")
-        project.networks[key] = Network(key=key, name=net_name, external=external)
+        project.networks[key] = Network(
+            key=key,
+            name=net_name,
+            external=external,
+            driver=cfg.get("driver"),
+            driver_opts=_as_mapping(cfg.get("driver_opts"), "networks.driver_opts"),
+            labels=_as_mapping(cfg.get("labels"), "networks.labels"),
+        )
 
     raw_volumes = raw.get("volumes") or {}
     for key, cfg in raw_volumes.items():
         cfg = cfg or {}
         external = bool(cfg.get("external", False))
         vol_name = cfg.get("name") or (key if external else f"{name}_{key}")
-        project.volumes[key] = Volume(key=key, name=vol_name, external=external)
+        project.volumes[key] = Volume(
+            key=key,
+            name=vol_name,
+            external=external,
+            driver=cfg.get("driver"),
+            driver_opts=_as_mapping(cfg.get("driver_opts"), "volumes.driver_opts"),
+            labels=_as_mapping(cfg.get("labels"), "volumes.labels"),
+        )
 
     project.secrets = _parse_secret_definitions(raw.get("secrets"), project_dir)
     project.configs = _parse_config_definitions(raw.get("configs"), project_dir, env)

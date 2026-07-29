@@ -425,7 +425,13 @@ def _cmd_up(ns: argparse.Namespace) -> int:
         if net.external:
             if net.name not in engine.network_names():
                 raise ComposeError(f"external network {net.name!r} not found")
-        elif engine.ensure_network(net.name, dry_run=ns.dry_run):
+        elif engine.ensure_network(
+            net.name,
+            dry_run=ns.dry_run,
+            driver=net.driver,
+            driver_opts=net.driver_opts,
+            labels=net.labels,
+        ):
             _info(f"Network {net.name} created")
 
     needed_volumes = {
@@ -437,7 +443,13 @@ def _cmd_up(ns: argparse.Namespace) -> int:
         if vol.external:
             if vol.name not in engine.volume_names():
                 raise ComposeError(f"external volume {vol.name!r} not found")
-        elif engine.ensure_volume(vol.name, dry_run=ns.dry_run):
+        elif engine.ensure_volume(
+            vol.name,
+            dry_run=ns.dry_run,
+            driver=vol.driver,
+            driver_opts=vol.driver_opts,
+            labels=vol.labels,
+        ):
             _info(f"Volume {vol.name} created")
 
     for service in services:
@@ -647,7 +659,13 @@ def _ensure_service_resources(
         if network.external:
             if name not in engine.network_names():
                 raise ComposeError(f"external network {name!r} not found")
-        elif engine.ensure_network(name, dry_run=dry_run):
+        elif engine.ensure_network(
+            name,
+            dry_run=dry_run,
+            driver=network.driver,
+            driver_opts=network.driver_opts,
+            labels=network.labels,
+        ):
             _info(f"Network {name} created")
 
     volumes_by_name = {volume.name: volume for volume in project.volumes.values()}
@@ -663,7 +681,13 @@ def _ensure_service_resources(
         if volume.external:
             if volume.name not in engine.volume_names():
                 raise ComposeError(f"external volume {volume.name!r} not found")
-        elif engine.ensure_volume(volume.name, dry_run=dry_run):
+        elif engine.ensure_volume(
+            volume.name,
+            dry_run=dry_run,
+            driver=volume.driver,
+            driver_opts=volume.driver_opts,
+            labels=volume.labels,
+        ):
             _info(f"Volume {volume.name} created")
 
 

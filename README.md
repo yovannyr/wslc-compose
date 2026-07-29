@@ -323,7 +323,8 @@ Show the wslc-compose and wslc versions.
 | anonymous volumes | generated project/service/replica-scoped wslc volumes |
 | `volumes` — bind mounts (`./rel`, `/abs`, `~`, `E:\win\path`), `:ro` | `-v` with [path translation](#volumes-and-path-translation) |
 | `tmpfs` (top-level list or `type: tmpfs`) | `--tmpfs` |
-| `networks` incl. `aliases`, `external: true`, custom `name:` | `wslc network create`, `--network`, `--network-alias` |
+| `networks` incl. aliases, external/name, driver/options/labels | `wslc network create`, `--network`, `--network-alias` |
+| named `volumes` incl. external/name, driver/options/labels | `wslc volume create`, `-v` |
 | `depends_on` conditions | start order plus `service_healthy` / `service_completed_successfully` waits |
 | `healthcheck` | startup/readiness checks executed with `wslc exec` |
 | `deploy.replicas` | number of containers (see also `--scale`) |
@@ -619,6 +620,9 @@ containers are never included in this rollback set.
   so `db:5432` style URLs from your Docker compose files work unchanged. (Verified
   against the preview: alias and name DNS both resolve.)
 - `external: true` networks are required to exist and are never created/removed.
+- Non-external network and volume definitions forward `driver`, `driver_opts`, and
+  `labels` to native `wslc network create` / `wslc volume create`. Metadata changes
+  do not recreate resources that already exist.
 - ⚠️ wslc accepts a **single `--network` per container**. If a service lists several
   networks, the first one is used (documented preview limitation).
 
