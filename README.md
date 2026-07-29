@@ -190,6 +190,9 @@ Create networks and volumes, build missing images, then create/start containers 
 | `--scale SERVICE=N` | override the number of replicas (repeatable) |
 | `--remove-orphans` | remove project containers whose service is no longer declared |
 | `--no-start` | create containers with native `wslc create` without starting them |
+| `--abort-on-container-exit` | stop the remaining services when any container exits |
+| `--abort-on-container-failure` | stop the remaining services after the first non-zero exit |
+| `--exit-code-from SERVICE` | return this service's exit code and imply abort-on-exit |
 | `-t, --timeout SEC` | stop timeout when recreating (default 10) |
 
 Without `-d`, logs of the started services are followed after startup; `Ctrl+C`
@@ -200,6 +203,11 @@ detaches **without stopping the containers**.
 Creates containers with the native `wslc create` command but does not start them.
 It supports the build, pull, scale, recreate, anonymous-volume, and orphan options
 from `up`. `up --no-start` is equivalent.
+
+For test and migration stacks, the `up` job-exit options monitor container state and
+return the relevant workload exit code. When an exit condition triggers, remaining
+containers are stopped in reverse dependency order and their `pre_stop` hooks are
+attempted. These foreground-only options cannot be combined with `--detach`.
 
 ### `down`
 

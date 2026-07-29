@@ -308,6 +308,71 @@ def _run_lifecycle_hooks(
             )
 
 
+def _monitor_job_exits(
+    project: Project,
+    service_names: List[str],
+    *,
+    abort_on_exit: bool,
+    abort_on_failure: bool,
+    exit_code_from: Optional[str],
+    dry_run: bool,
+) -> int:
+    selected = set(service_names)
+    while True:
+        containers = [
+            entry
+            for entry in _project_containers(project)
+            if entry["service"] in selected
+        ]
+        if not containers:
+            raise ComposeError("no containers found while monitoring job exits")
+        stopped = [entry for entry in containers if not entry["running"]]
+        trigger = None
+        if exit_code_from:
+            trigger = next(
+                (entry for entry in stopped if entry["service"] == exit_code_from),
+                None,
+            )
+        if trigger is None and abort_on_failure:
+            trigger = next(
+                (entry for entry in stopped if int(entry["exit_code"] or 0) != 0),
+                None,
+            )
+        if trigger is None and abort_on_exit and stopped:
+            trigger = stopped[0]
+        if trigger is not None:
+            for entry in _ordered_containers(project, containers, reverse=True):
+                if not entry["running"]:
+                    continue
+                service = project.services.get(entry["service"])
+                if service is not None:
+                    try:
+                        _run_lifecycle_hooks(
+                            entry["name"], service.pre_stop, "pre_stop", dry_run
+                        )
+                    except ComposeError as exc:
+                        _err(f"warning: {exc}")
+                engine.run(
+                    [
+                        "stop", "-t",
+                        str(_stop_timeout(project, entry["service"], 10)),
+                        entry["name"],
+                    ],
+                    capture=True,
+                    dry_run=dry_run,
+                )
+            return int(trigger["exit_code"] or 0)
+        if len(stopped) == len(containers):
+            if exit_code_from:
+                target = next(
+                    (entry for entry in stopped if entry["service"] == exit_code_from),
+                    None,
+                )
+                return int((target or {}).get("exit_code") or 0)
+            return max((int(entry["exit_code"] or 0) for entry in stopped), default=0)
+        time.sleep(0.5)
+
+
 def cmd_up(ns: argparse.Namespace) -> int:
     ns._created_containers = []
     try:
@@ -335,6 +400,14 @@ def _cmd_up(ns: argparse.Namespace) -> int:
         raise ComposeError("--force-recreate and --no-recreate cannot be used together")
     if getattr(ns, "no_start", False) and ns.wait:
         raise ComposeError("--no-start and --wait cannot be used together")
+    abort_on_exit = getattr(ns, "abort_on_container_exit", False)
+    abort_on_failure = getattr(ns, "abort_on_container_failure", False)
+    exit_code_from = getattr(ns, "exit_code_from", None)
+    job_exit_requested = bool(abort_on_exit or abort_on_failure or exit_code_from)
+    if job_exit_requested and ns.detach:
+        raise ComposeError("job exit options cannot be used with --detach")
+    if exit_code_from and exit_code_from not in project.services:
+        raise ComposeError(f"no such service: {exit_code_from}")
 
     scale: Dict[str, int] = {}
     for spec in ns.scale or []:
@@ -517,6 +590,16 @@ def _cmd_up(ns: argparse.Namespace) -> int:
                 _wait_for_service_health(
                     project, service, readiness_deadline, scale.get(service.name)
                 )
+
+    if job_exit_requested and not ns.dry_run:
+        return _monitor_job_exits(
+            project,
+            [service.name for service in services],
+            abort_on_exit=abort_on_exit or bool(exit_code_from),
+            abort_on_failure=abort_on_failure,
+            exit_code_from=exit_code_from,
+            dry_run=ns.dry_run,
+        )
 
     if (
         ns.wait
@@ -1101,6 +1184,9 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--no-recreate", action="store_true")
     p.add_argument("--always-recreate-deps", action="store_true")
     p.add_argument("--renew-anon-volumes", action="store_true")
+    p.add_argument("--abort-on-container-exit", action="store_true")
+    p.add_argument("--abort-on-container-failure", action="store_true")
+    p.add_argument("--exit-code-from", metavar="SERVICE")
     p.add_argument("-t", "--timeout", type=int, default=10)
     p.set_defaults(func=cmd_up)
 
