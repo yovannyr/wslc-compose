@@ -51,6 +51,8 @@ def run_args(
         args += ["-v", spec]
     for secret in service.secrets:
         args += ["-v", f"{mapper(secret.file)}:{secret.target}:ro"]
+    for config in service.configs:
+        args += ["-v", f"{mapper(config.file)}:{config.target}:ro"]
     for target in service.tmpfs:
         args += ["--tmpfs", target]
 

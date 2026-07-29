@@ -3,9 +3,11 @@
 from __future__ import annotations
 
 import copy
+import hashlib
 import os
 import re
 import shlex
+import tempfile
 from typing import Any, Dict, List, Optional, Sequence, Tuple
 
 import yaml
@@ -13,6 +15,8 @@ import yaml
 from wslc_compose.interpolation import interpolate_tree
 from wslc_compose.model import (
     BuildConfig,
+    Config,
+    ConfigMount,
     Dependency,
     Healthcheck,
     Network,
@@ -41,7 +45,6 @@ UNSUPPORTED_KEYS = {
     "devices": "device mapping is not supported by wslc (see 'gpus' for GPUs)",
     "extra_hosts": "extra_hosts is not supported by wslc",
     "sysctls": "sysctls are not supported by wslc",
-    "configs": "configs are not supported; use bind mounts instead",
     "init": "init is not supported by wslc",
     "pid": "pid mode is not supported by wslc",
     "ipc": "ipc mode is not supported by wslc",
@@ -431,6 +434,116 @@ def _parse_service_secrets(
     return mounts, warnings
 
 
+def _materialize_config(key: str, content: str) -> str:
+    digest = hashlib.sha256(content.encode()).hexdigest()[:16]
+    safe_key = re.sub(r"[^A-Za-z0-9_.-]", "_", key)
+    directory = os.path.join(tempfile.gettempdir(), "wslc-compose", "configs")
+    os.makedirs(directory, exist_ok=True)
+    path = os.path.join(directory, f"{safe_key}-{digest}")
+    if not os.path.isfile(path):
+        with open(path, "w", encoding="utf-8", newline="") as fh:
+            fh.write(content)
+    return path
+
+
+def _parse_config_definitions(
+    value: Any, project_dir: str, env: Dict[str, str]
+) -> Dict[str, Config]:
+    if value is None:
+        return {}
+    if not isinstance(value, dict):
+        raise ComposeError(f"configs: expected mapping, got {type(value).__name__}")
+
+    result = {}
+    for raw_key, cfg in value.items():
+        key = str(raw_key)
+        if not isinstance(cfg, dict):
+            raise ComposeError(f"config {key!r}: expected a mapping")
+        if cfg.get("external"):
+            raise ComposeError(
+                f"config {key!r}: external configs are not supported because wslc "
+                "has no config object store"
+            )
+        sources = [source for source in ("file", "content", "environment") if source in cfg]
+        if len(sources) != 1:
+            raise ComposeError(
+                f"config {key!r}: exactly one of file, content, or environment is required"
+            )
+        source = sources[0]
+        if source == "file":
+            path = _resolve_bind_source(str(cfg[source]), project_dir)
+            if not os.path.isfile(path):
+                raise ComposeError(f"config {key!r}: file not found: {path}")
+        elif source == "environment":
+            variable = str(cfg[source])
+            if variable not in env:
+                raise ComposeError(
+                    f"config {key!r}: environment variable {variable!r} is not set"
+                )
+            path = _materialize_config(key, env[variable])
+        else:
+            path = _materialize_config(key, str(cfg[source]))
+        result[key] = Config(key=key, file=path)
+    return result
+
+
+def _parse_service_configs(
+    value: Any,
+    definitions: Dict[str, Config],
+    service_name: str,
+) -> Tuple[List[ConfigMount], List[str]]:
+    if value is None:
+        return [], []
+    if not isinstance(value, list):
+        raise ComposeError(
+            f"{service_name}: configs: expected list, got {type(value).__name__}"
+        )
+
+    mounts = []
+    warnings = []
+    targets = set()
+    for spec in value:
+        if isinstance(spec, str):
+            source = spec
+            target = spec
+            ignored = []
+        elif isinstance(spec, dict) and spec.get("source"):
+            source = str(spec["source"])
+            target = str(spec.get("target") or source)
+            ignored = [key for key in ("uid", "gid", "mode") if key in spec]
+        else:
+            raise ComposeError(
+                f"{service_name}: config entry must be a name or mapping with source"
+            )
+        definition = definitions.get(source)
+        if definition is None:
+            raise ComposeError(
+                f"service {service_name!r} references undefined config {source!r}"
+            )
+        if target.startswith("/"):
+            container_target = target
+        else:
+            if target in ("", ".", "..") or "/" in target or "\\" in target:
+                raise ComposeError(
+                    f"{service_name}: config {source!r} has invalid target {target!r}"
+                )
+            container_target = f"/{target}"
+        if container_target in targets:
+            raise ComposeError(
+                f"{service_name}: multiple configs target {container_target!r}"
+            )
+        targets.add(container_target)
+        mounts.append(
+            ConfigMount(source=source, file=definition.file, target=container_target)
+        )
+        if ignored:
+            warnings.append(
+                f"config {source!r}: {', '.join(ignored)} cannot be enforced by "
+                "wslc file mounts and will be ignored"
+            )
+    return mounts, warnings
+
+
 _DURATION_RE = re.compile(r"(\d+(?:\.\d+)?)(ns|us|ms|s|m|h)")
 _DURATION_FACTORS = {
     "ns": 0.000000001,
@@ -591,6 +704,7 @@ def load_project(
         project.volumes[key] = Volume(key=key, name=vol_name, external=external)
 
     project.secrets = _parse_secret_definitions(raw.get("secrets"), project_dir)
+    project.configs = _parse_config_definitions(raw.get("configs"), project_dir, env)
 
     # --- services ----------------------------------------------------------
     for svc_name, cfg in (raw.get("services") or {}).items():
@@ -630,13 +744,25 @@ def load_project(
         svc.secrets, secret_warnings = _parse_service_secrets(
             cfg.get("secrets"), project.secrets, str(svc_name)
         )
+        svc.configs, config_warnings = _parse_service_configs(
+            cfg.get("configs"), project.configs, str(svc_name)
+        )
         project.warnings.extend(f"{svc_name}: {w}" for w in secret_warnings)
-        volume_targets = {mount.target for mount in svc.volumes}
+        project.warnings.extend(f"{svc_name}: {w}" for w in config_warnings)
+        occupied_targets = {mount.target for mount in svc.volumes}
         for secret in svc.secrets:
-            if secret.target in volume_targets:
+            if secret.target in occupied_targets:
                 raise ComposeError(
                     f"{svc_name}: secret target {secret.target!r} conflicts with a volume"
                 )
+            occupied_targets.add(secret.target)
+        for config in svc.configs:
+            if config.target in occupied_targets:
+                raise ComposeError(
+                    f"{svc_name}: config target {config.target!r} conflicts with "
+                    "another mount"
+                )
+            occupied_targets.add(config.target)
         svc.tmpfs = _as_list(cfg.get("tmpfs"))
 
         # networks: list or mapping (with aliases); default network otherwise

@@ -60,6 +60,23 @@ class SecretMount:
 
 
 @dataclass
+class Config:
+    """A materialized top-level Compose config."""
+
+    key: str
+    file: str
+
+
+@dataclass
+class ConfigMount:
+    """A read-only config granted to one service."""
+
+    source: str
+    file: str
+    target: str
+
+
+@dataclass
 class PortMapping:
     target: int
     published: Optional[str] = None  # may be None (random), a port, or "ip:port"
@@ -87,6 +104,7 @@ class Service:
     ports: List[PortMapping] = field(default_factory=list)
     volumes: List[VolumeMount] = field(default_factory=list)
     secrets: List[SecretMount] = field(default_factory=list)
+    configs: List[ConfigMount] = field(default_factory=list)
     tmpfs: List[str] = field(default_factory=list)
     networks: List[str] = field(default_factory=list)  # project-resolved network names
     network_aliases: Dict[str, List[str]] = field(default_factory=dict)
@@ -140,6 +158,7 @@ class Project:
     networks: Dict[str, Network] = field(default_factory=dict)
     volumes: Dict[str, Volume] = field(default_factory=dict)
     secrets: Dict[str, Secret] = field(default_factory=dict)
+    configs: Dict[str, Config] = field(default_factory=dict)
     warnings: List[str] = field(default_factory=list)
 
     def container_name(self, service: Service, index: int = 1) -> str:
