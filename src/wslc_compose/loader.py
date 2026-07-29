@@ -129,6 +129,156 @@ def merge_compose_models(base: Any, override: Any, path: Tuple[str, ...] = ()) -
     return copy.deepcopy(override)
 
 
+def _absolutize_document_paths(document: Dict[str, Any], project_dir: str) -> None:
+    for config in (document.get("secrets") or {}).values():
+        if isinstance(config, dict) and config.get("file"):
+            config["file"] = _resolve_bind_source(str(config["file"]), project_dir)
+    for config in (document.get("configs") or {}).values():
+        if isinstance(config, dict) and config.get("file"):
+            config["file"] = _resolve_bind_source(str(config["file"]), project_dir)
+
+    for service in (document.get("services") or {}).values():
+        if not isinstance(service, dict):
+            continue
+        build = service.get("build")
+        if isinstance(build, str):
+            service["build"] = _resolve_bind_source(build, project_dir)
+        elif isinstance(build, dict):
+            build["context"] = _resolve_bind_source(
+                str(build.get("context", ".")), project_dir
+            )
+        env_file = service.get("env_file")
+        if isinstance(env_file, str):
+            service["env_file"] = _resolve_bind_source(env_file, project_dir)
+        elif isinstance(env_file, list):
+            service["env_file"] = [
+                _resolve_bind_source(str(path), project_dir) for path in env_file
+            ]
+        volumes = []
+        for volume in service.get("volumes") or []:
+            if isinstance(volume, dict):
+                if volume.get("type") == "bind" and volume.get("source"):
+                    volume["source"] = _resolve_bind_source(
+                        str(volume["source"]), project_dir
+                    )
+                volumes.append(volume)
+                continue
+            parts = list(_split_volume_spec(str(volume)))
+            if len(parts) >= 2 and _is_host_path(parts[0]):
+                parts[0] = _resolve_bind_source(parts[0], project_dir)
+            volumes.append(":".join(parts))
+        if "volumes" in service:
+            service["volumes"] = volumes
+
+
+def _load_compose_document(
+    path: str,
+    env: Dict[str, str],
+    stack: Optional[List[str]] = None,
+    absolutize_paths: bool = False,
+    project_directory: Optional[str] = None,
+) -> Dict[str, Any]:
+    path = os.path.abspath(path)
+    stack = list(stack or [])
+    if path in stack:
+        raise ComposeError("circular include: " + " -> ".join(stack + [path]))
+    stack.append(path)
+    with open(path, encoding="utf-8") as fh:
+        document = yaml.safe_load(fh)
+    if document is None:
+        document = {}
+    if not isinstance(document, dict):
+        raise ComposeError(f"{path}: expected a mapping at the document root")
+    document = interpolate_tree(document, env)
+
+    includes = document.pop("include", [])
+    if isinstance(includes, (str, dict)):
+        includes = [includes]
+    if not isinstance(includes, list):
+        raise ComposeError(f"{path}: include must be a path, mapping, or list")
+
+    merged: Dict[str, Any] = {}
+    for include in includes:
+        include_project_dir = None
+        env_files = []
+        if isinstance(include, str):
+            include_paths = [include]
+        elif isinstance(include, dict) and include.get("path"):
+            raw_paths = include["path"]
+            include_paths = [raw_paths] if isinstance(raw_paths, str) else list(raw_paths)
+            if include.get("project_directory"):
+                include_project_dir = _resolve_bind_source(
+                    str(include["project_directory"]), os.path.dirname(path)
+                )
+            raw_env_files = include.get("env_file") or []
+            env_files = [raw_env_files] if isinstance(raw_env_files, str) else raw_env_files
+        else:
+            raise ComposeError(f"{path}: invalid include entry {include!r}")
+
+        for include_path in include_paths:
+            resolved_path = _resolve_bind_source(str(include_path), os.path.dirname(path))
+            effective_project_dir = include_project_dir or os.path.dirname(resolved_path)
+            include_env = dict(env)
+            for env_file in env_files:
+                include_env.update(
+                    load_dotenv(
+                        _resolve_bind_source(str(env_file), effective_project_dir)
+                    )
+                )
+            include_env.update(os.environ)
+            included = _load_compose_document(
+                resolved_path,
+                include_env,
+                stack,
+                absolutize_paths=True,
+                project_directory=effective_project_dir,
+            )
+            merged = merge_compose_models(merged, included)
+
+    merged = merge_compose_models(merged, document)
+    if absolutize_paths:
+        _absolutize_document_paths(
+            merged, project_directory or os.path.dirname(path)
+        )
+    return merged
+
+
+def _resolve_service_extends(
+    raw: Dict[str, Any], project_dir: str, env: Dict[str, str]
+) -> None:
+    services = raw.get("services") or {}
+    resolved = {}
+
+    def resolve(name: str, stack: List[str], source_services: Dict[str, Any]) -> Dict[str, Any]:
+        if name in stack:
+            raise ComposeError("circular extends: " + " -> ".join(stack + [name]))
+        config = source_services.get(name)
+        if not isinstance(config, dict):
+            raise ComposeError(f"extends references undefined service {name!r}")
+        extends = config.get("extends")
+        if not extends:
+            return copy.deepcopy(config)
+        if isinstance(extends, str):
+            base_name = extends
+            base_services = source_services
+        elif isinstance(extends, dict) and extends.get("service"):
+            base_name = str(extends["service"])
+            base_services = source_services
+            if extends.get("file"):
+                extends_path = _resolve_bind_source(str(extends["file"]), project_dir)
+                base_document = _load_compose_document(extends_path, env)
+                base_services = base_document.get("services") or {}
+        else:
+            raise ComposeError(f"service {name!r}: invalid extends value")
+        base = resolve(base_name, stack + [name], base_services)
+        override = {key: value for key, value in config.items() if key != "extends"}
+        return merge_compose_models(base, override, ("services", name))
+
+    for service_name in services:
+        resolved[str(service_name)] = resolve(str(service_name), [], services)
+    raw["services"] = resolved
+
+
 def find_compose_file(directory: str) -> Optional[str]:
     for name in COMPOSE_FILENAMES:
         path = os.path.join(directory, name)
@@ -674,16 +824,11 @@ def load_project(
 
     raw: Dict[str, Any] = {}
     for path in compose_files:
-        with open(path, encoding="utf-8") as fh:
-            document = yaml.safe_load(fh)
-        if document is None:
-            document = {}
-        if not isinstance(document, dict):
-            raise ComposeError(f"{path}: expected a mapping at the document root")
-        raw = merge_compose_models(raw, interpolate_tree(document, env))
+        raw = merge_compose_models(raw, _load_compose_document(path, env))
     if not isinstance(raw, dict) or "services" not in raw:
         raise ComposeError(f"{compose_files[0]}: no 'services' section found")
 
+    _resolve_service_extends(raw, project_dir, env)
     name = normalize_project_name(
         project_name
         or env.get("COMPOSE_PROJECT_NAME")
