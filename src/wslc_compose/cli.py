@@ -118,6 +118,7 @@ def _project_containers(project: Project) -> List[dict]:
                 "hash": labels.get(LABEL_CONFIG_HASH, ""),
                 "running": bool(state.get("Running")),
                 "status": state.get("Status", "unknown"),
+                "exit_code": state.get("ExitCode"),
                 "ports": entry.get("Ports") or [],
             }
         )
@@ -617,6 +618,8 @@ def _follow_logs(
     follow: bool,
     tail: Optional[int] = None,
     timestamps: bool = False,
+    since: Optional[str] = None,
+    until: Optional[str] = None,
 ) -> int:
     containers = [
         c
@@ -647,6 +650,10 @@ def _follow_logs(
             args += ["-n", str(tail)]
         if timestamps:
             args.append("-t")
+        if since is not None:
+            args += ["--since", since]
+        if until is not None:
+            args += ["--until", until]
         args.append(entry["name"])
         proc = engine.popen(
             args, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True
@@ -674,6 +681,8 @@ def cmd_logs(ns: argparse.Namespace) -> int:
         follow=ns.follow,
         tail=ns.tail,
         timestamps=ns.timestamps,
+        since=ns.since,
+        until=ns.until,
     )
 
 
@@ -695,6 +704,125 @@ def cmd_exec(ns: argparse.Namespace) -> int:
     args += ns.command
     proc = engine.run(args, check=False, dry_run=ns.dry_run)
     return proc.returncode
+
+
+def _selected_containers(project: Project, services: List[str]) -> List[dict]:
+    for service in services:
+        if service not in project.services:
+            raise ComposeError(f"no such service: {service}")
+    containers = _project_containers(project)
+    if services:
+        containers = [entry for entry in containers if entry["service"] in services]
+    return containers
+
+
+def cmd_kill(ns: argparse.Namespace) -> int:
+    project = _load(ns)
+    containers = _selected_containers(project, ns.services)
+    if not containers:
+        raise ComposeError("no containers found")
+    for entry in _ordered_containers(project, containers, reverse=True):
+        if entry["running"]:
+            engine.run(
+                ["kill", "-s", ns.signal, entry["name"]],
+                dry_run=ns.dry_run,
+            )
+    return 0
+
+
+def cmd_rm(ns: argparse.Namespace) -> int:
+    project = _load(ns)
+    containers = _selected_containers(project, ns.services)
+    if not containers:
+        raise ComposeError("no containers found")
+    for entry in _ordered_containers(project, containers, reverse=True):
+        if entry["running"]:
+            if not ns.stop:
+                _err(f"warning: {entry['name']} is running; use --stop to remove it")
+                continue
+            engine.run(
+                [
+                    "stop",
+                    "-t",
+                    str(_stop_timeout(project, entry["service"], ns.timeout)),
+                    entry["name"],
+                ],
+                capture=True,
+                dry_run=ns.dry_run,
+            )
+        engine.run(["remove", "-f", entry["name"]], dry_run=ns.dry_run)
+    return 0
+
+
+def cmd_wait(ns: argparse.Namespace) -> int:
+    project = _load(ns)
+    deadline = time.monotonic() + ns.timeout if ns.timeout is not None else None
+    while True:
+        containers = _selected_containers(project, ns.services)
+        if not containers:
+            raise ComposeError("no containers found")
+        if not any(entry["running"] for entry in containers):
+            exit_codes = [
+                int(entry["exit_code"])
+                for entry in containers
+                if entry["exit_code"] is not None
+            ]
+            return max(exit_codes, default=0)
+        if deadline is not None and time.monotonic() >= deadline:
+            raise ComposeError("timed out waiting for project containers")
+        time.sleep(0.5)
+
+
+def cmd_images(ns: argparse.Namespace) -> int:
+    project = _load(ns)
+    rows = []
+    for service in _select_services(project, ns.services, ns.profile):
+        image = flags.image_name(project, service)
+        rows.append([service.name, image, "yes" if engine.image_exists(image) else "no"])
+    _print_table(rows, ["SERVICE", "IMAGE", "AVAILABLE"])
+    return 0
+
+
+def cmd_push(ns: argparse.Namespace) -> int:
+    project = _load(ns)
+    pushed = 0
+    for service in _select_services(project, ns.services, ns.profile):
+        if not service.image:
+            _err(f"warning: {service.name} has no image name; skipping")
+            continue
+        engine.run(["push", service.image], dry_run=ns.dry_run)
+        pushed += 1
+    if not pushed:
+        raise ComposeError("no service images to push")
+    return 0
+
+
+def cmd_port(ns: argparse.Namespace) -> int:
+    project = _load(ns)
+    containers = [
+        entry
+        for entry in _selected_containers(project, [ns.service])
+        if entry["index"] == ns.index
+    ]
+    if not containers:
+        raise ComposeError(f"no container found for {ns.service} index {ns.index}")
+    port_text = str(ns.private_port)
+    private_port, _, protocol = port_text.partition("/")
+    expected_protocol = protocol or "tcp"
+    matches = []
+    for port in containers[0]["ports"]:
+        actual_protocol = PROTOCOLS.get(port.get("Protocol"), str(port.get("Protocol", "")))
+        if (
+            str(port.get("ContainerPort")) == private_port
+            and actual_protocol == expected_protocol
+        ):
+            address = port.get("BindingAddress") or "0.0.0.0"
+            matches.append(f"{address}:{port.get('HostPort')}")
+    if not matches:
+        raise ComposeError(f"port {port_text} is not published for service {ns.service}")
+    for match in matches:
+        print(match)
+    return 0
 
 
 def _lifecycle(ns: argparse.Namespace, action: str) -> int:
@@ -840,6 +968,8 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("-f", "--follow", action="store_true")
     p.add_argument("-n", "--tail", type=int)
     p.add_argument("-t", "--timestamps", action="store_true")
+    p.add_argument("--since")
+    p.add_argument("--until")
     p.set_defaults(func=cmd_logs)
 
     p = sub.add_parser("run", help="run a one-off command for a service")
@@ -874,6 +1004,37 @@ def build_parser() -> argparse.ArgumentParser:
         p.add_argument("services", nargs="*")
         p.add_argument("-t", "--timeout", type=int, default=10)
         p.set_defaults(func=lambda ns, a=action: _lifecycle(ns, a))
+
+    p = sub.add_parser("kill", help="force stop service containers")
+    p.add_argument("services", nargs="*")
+    p.add_argument("-s", "--signal", default="KILL")
+    p.set_defaults(func=cmd_kill)
+
+    p = sub.add_parser("rm", help="remove service containers")
+    p.add_argument("services", nargs="*")
+    p.add_argument("-f", "--force", action="store_true")
+    p.add_argument("-s", "--stop", action="store_true")
+    p.add_argument("-t", "--timeout", type=int, default=10)
+    p.set_defaults(func=cmd_rm)
+
+    p = sub.add_parser("wait", help="wait for service containers to stop")
+    p.add_argument("services", nargs="*")
+    p.add_argument("--timeout", type=float)
+    p.set_defaults(func=cmd_wait)
+
+    p = sub.add_parser("images", help="list images used by services")
+    p.add_argument("services", nargs="*")
+    p.set_defaults(func=cmd_images)
+
+    p = sub.add_parser("push", help="push service images")
+    p.add_argument("services", nargs="*")
+    p.set_defaults(func=cmd_push)
+
+    p = sub.add_parser("port", help="print a published port for a service")
+    p.add_argument("service")
+    p.add_argument("private_port")
+    p.add_argument("--index", type=int, default=1)
+    p.set_defaults(func=cmd_port)
 
     p = sub.add_parser("pull", help="pull service images")
     p.add_argument("services", nargs="*")
