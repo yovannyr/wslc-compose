@@ -814,6 +814,13 @@ def cmd_down(ns: argparse.Namespace) -> int:
                 )
             except WslcError:
                 _err(f"warning: could not remove volume {volume_name}")
+    if getattr(ns, "rmi", None):
+        for service in project.services.values():
+            if ns.rmi == "local" and service.build is None:
+                continue
+            image = flags.image_name(project, service)
+            _info(f"Removing image {image}")
+            engine.run(["rmi", image], check=False, dry_run=ns.dry_run)
     return 0
 
 
@@ -837,6 +844,20 @@ def cmd_ps(ns: argparse.Namespace) -> int:
         for entry in sorted(containers, key=lambda c: (c["service"], c["index"]))
     ]
     _print_table(rows, ["NAME", "SERVICE", "IMAGE", "STATUS", "PORTS"])
+    return 0
+
+
+def cmd_stats(ns: argparse.Namespace) -> int:
+    project = _load(ns)
+    containers = _selected_containers(project, ns.services)
+    if not ns.all:
+        containers = [entry for entry in containers if entry["running"]]
+    for entry in containers:
+        args = ["stats", "--format", ns.format]
+        if ns.no_trunc:
+            args.append("--no-trunc")
+        args.append(entry["name"])
+        engine.run(args, dry_run=ns.dry_run)
     return 0
 
 
@@ -1110,17 +1131,27 @@ def _lifecycle(ns: argparse.Namespace, action: str) -> int:
 
 def cmd_pull(ns: argparse.Namespace) -> int:
     project = _load(ns)
+    failures = 0
     for svc in _select_services(project, ns.services, ns.profile):
         if svc.image:
             _info(f"Pulling {svc.image} ...")
-            engine.run(["pull", svc.image], dry_run=ns.dry_run)
-    return 0
+            try:
+                engine.run(["pull", svc.image], dry_run=ns.dry_run)
+            except WslcError as exc:
+                failures += 1
+                if not getattr(ns, "ignore_pull_failures", False):
+                    raise
+                _err(f"warning: could not pull {svc.image}: {exc}")
+    return 0 if getattr(ns, "ignore_pull_failures", False) or not failures else 1
 
 
 def cmd_build(ns: argparse.Namespace) -> int:
     project = _load(ns)
     built = 0
-    for svc in _select_services(project, ns.services, ns.profile):
+    services = _select_services(project, ns.services, ns.profile)
+    if ns.services and not getattr(ns, "with_dependencies", False):
+        services = [service for service in services if service.name in ns.services]
+    for svc in services:
         if not svc.build:
             continue
         _info(f"Building {svc.name} ...")
@@ -1153,6 +1184,19 @@ def cmd_config(ns: argparse.Namespace) -> int:
         print(yaml.safe_dump(report, sort_keys=False, default_flow_style=False))
         return 0
     project = _load(ns)
+    if ns.services:
+        print("\n".join(sorted(project.services)))
+        return 0
+    if ns.images:
+        images = {flags.image_name(project, service) for service in project.services.values()}
+        print("\n".join(sorted(images)))
+        return 0
+    if ns.profiles:
+        profiles = {profile for service in project.services.values() for profile in service.profiles}
+        print("\n".join(sorted(profiles)))
+        return 0
+    if ns.quiet:
+        return 0
     print(yaml.safe_dump(dataclasses.asdict(project), sort_keys=False, default_flow_style=False))
     return 0
 
@@ -1232,6 +1276,7 @@ def build_parser() -> argparse.ArgumentParser:
     p = sub.add_parser("down", help="stop and remove project containers and networks")
     p.add_argument("-v", "--volumes", action="store_true", help="also remove named volumes")
     p.add_argument("--remove-orphans", action="store_true")
+    p.add_argument("--rmi", choices=("local", "all"))
     p.add_argument("-t", "--timeout", type=int, default=10)
     p.set_defaults(func=cmd_down)
 
@@ -1239,6 +1284,14 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("services", nargs="*")
     p.add_argument("-q", "--quiet", action="store_true")
     p.set_defaults(func=cmd_ps)
+
+    p = sub.add_parser("stats", help="show service container resource usage")
+    p.add_argument("services", nargs="*")
+    p.add_argument("-a", "--all", action="store_true")
+    p.add_argument("--format", choices=("table", "json"), default="table")
+    p.add_argument("--no-trunc", action="store_true")
+    p.set_defaults(func=cmd_stats)
+
 
     p = sub.add_parser("logs", help="show container logs")
     p.add_argument("services", nargs="*")
@@ -1315,11 +1368,13 @@ def build_parser() -> argparse.ArgumentParser:
 
     p = sub.add_parser("pull", help="pull service images")
     p.add_argument("services", nargs="*")
+    p.add_argument("--ignore-pull-failures", action="store_true")
     p.set_defaults(func=cmd_pull)
 
     p = sub.add_parser("build", help="build service images")
     p.add_argument("services", nargs="*")
     p.add_argument("--no-cache", action="store_true")
+    p.add_argument("--with-dependencies", action="store_true")
     p.set_defaults(func=cmd_build)
 
     p = sub.add_parser("config", help="print the resolved configuration")
@@ -1328,6 +1383,11 @@ def build_parser() -> argparse.ArgumentParser:
         action="store_true",
         help="print wslc-compose runtime capabilities without loading a project",
     )
+    output = p.add_mutually_exclusive_group()
+    output.add_argument("--services", action="store_true")
+    output.add_argument("--images", action="store_true")
+    output.add_argument("--profiles", action="store_true")
+    output.add_argument("-q", "--quiet", action="store_true")
     p.set_defaults(func=cmd_config)
 
     p = sub.add_parser("version", help="show version information")

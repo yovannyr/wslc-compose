@@ -217,6 +217,7 @@ Stop and remove all of the project's containers, then remove its non-external ne
 |---|---|
 | `-v, --volumes` | also remove non-external named and generated anonymous volumes |
 | `--remove-orphans` | also remove containers for services no longer in the model |
+| `--rmi local\|all` | remove built images only, or every service image |
 | `-t, --timeout SEC` | stop timeout (default 10) |
 
 ### `ps [SERVICE...]`
@@ -276,6 +277,7 @@ configs, network, user, working directory, and resource limits.
 - `kill [-s SIGNAL] [SERVICE...]` force-stops containers in reverse dependency order.
 - `rm [--stop] [SERVICE...]` removes service containers.
 - `images [SERVICE...]` reports required images and local availability.
+- `stats [--all] [--format table|json] [SERVICE...]` forwards resource snapshots.
 - `push [SERVICE...]` pushes explicitly named service images.
 - `port SERVICE PRIVATE_PORT` prints the published host binding.
 
@@ -286,17 +288,23 @@ Lifecycle of existing project containers, without recreating them.
 
 ### `pull [SERVICE...]`
 
-Pull the images of services that have an `image:` key.
+Pull the images of services that have an `image:` key. With
+`--ignore-pull-failures`, failures are warnings and remaining images are still
+attempted.
 
-### `build [--no-cache] [SERVICE...]`
+### `build [--no-cache] [--with-dependencies] [SERVICE...]`
 
 Build every selected service that has a `build:` section, tagging the result
-`<project>-<service>` (unless `image:` names it explicitly).
+`<project>-<service>` (unless `image:` names it explicitly). Dependencies of an
+explicit service are built only with `--with-dependencies`.
 
 ### `config`
 
 Print the fully resolved configuration (after interpolation, normalization, name
 prefixing) as YAML — useful to debug what wslc-compose actually sees.
+
+`config --services`, `--images`, and `--profiles` print one resolved value per line;
+`config --quiet` validates the model without output.
 
 `config --capabilities` does not require a Compose file. It prints the options the
 current wslc runtime cannot honor and hard runtime boundaries such as one network per
