@@ -331,6 +331,10 @@ def _cmd_up(ns: argparse.Namespace) -> int:
     if not services:
         _err("no services to start")
         return 1
+    if getattr(ns, "force_recreate", False) and getattr(ns, "no_recreate", False):
+        raise ComposeError("--force-recreate and --no-recreate cannot be used together")
+    if getattr(ns, "no_start", False) and ns.wait:
+        raise ComposeError("--no-start and --wait cannot be used together")
 
     scale: Dict[str, int] = {}
     for spec in ns.scale or []:
@@ -432,12 +436,30 @@ def _cmd_up(ns: argparse.Namespace) -> int:
         for index in range(1, replicas + 1):
             cname = project.container_name(svc, index)
             current = existing.pop(cname, None)
+            recreate_dependency = bool(
+                getattr(ns, "always_recreate_deps", False)
+                and ns.services
+                and svc.name not in ns.services
+            )
             if current is not None:
-                fresh = current["hash"] == desired_hash and not ns.force_recreate
+                if getattr(ns, "no_recreate", False):
+                    fresh = True
+                else:
+                    fresh = current["hash"] == desired_hash and not (
+                        ns.force_recreate
+                        or recreate_dependency
+                        or (
+                            getattr(ns, "renew_anon_volumes", False)
+                            and any(mount.anonymous for mount in svc.volumes)
+                        )
+                    )
                 if fresh and current["running"]:
                     _info(f"Container {cname} is up-to-date")
                     continue
                 if fresh and not current["running"]:
+                    if getattr(ns, "no_start", False):
+                        _info(f"Container {cname} is up-to-date")
+                        continue
                     _info(f"Starting {cname} ...")
                     engine.run_retried(["start", cname], dry_run=ns.dry_run)
                     started.append(cname)
@@ -451,17 +473,36 @@ def _cmd_up(ns: argparse.Namespace) -> int:
                         ["stop", "-t", str(_stop_timeout(project, svc.name, ns.timeout)), cname], capture=True, dry_run=ns.dry_run
                     )
                 engine.run(["remove", "-f", cname], capture=True, dry_run=ns.dry_run)
+                if getattr(ns, "renew_anon_volumes", False):
+                    for mount in svc.volumes:
+                        if not mount.anonymous or mount.source is None:
+                            continue
+                        volume_name = f"{mount.source}-{index}"
+                        engine.run(
+                            ["volume", "remove", volume_name],
+                            capture=True,
+                            check=False,
+                            dry_run=ns.dry_run,
+                        )
+                        engine.ensure_volume(volume_name, dry_run=ns.dry_run)
+
             else:
                 _info(f"Creating {cname} ...")
             engine.run(
                 flags.run_args(
-                    project, svc, index, detach=True, path_mapper=engine.to_host_path
+                    project,
+                    svc,
+                    index,
+                    detach=True,
+                    path_mapper=engine.to_host_path,
+                    create_only=getattr(ns, "no_start", False),
                 ),
                 dry_run=ns.dry_run,
             )
             ns._created_containers.append(cname)
             started.append(cname)
-            _run_lifecycle_hooks(cname, svc.post_start, "post_start", ns.dry_run)
+            if not getattr(ns, "no_start", False):
+                _run_lifecycle_hooks(cname, svc.post_start, "post_start", ns.dry_run)
 
         # drop replicas beyond the requested scale
         for name, leftover in list(existing.items()):
@@ -477,7 +518,13 @@ def _cmd_up(ns: argparse.Namespace) -> int:
                     project, service, readiness_deadline, scale.get(service.name)
                 )
 
-    if ns.wait or ns.detach or ns.dry_run or not started:
+    if (
+        ns.wait
+        or ns.detach
+        or ns.dry_run
+        or getattr(ns, "no_start", False)
+        or not started
+    ):
         return 0
     _info("Attaching to logs (Ctrl+C to detach; containers keep running)")
     return _follow_logs(project, service_names=[s.name for s in services], follow=True)
@@ -907,6 +954,13 @@ def cmd_port(ns: argparse.Namespace) -> int:
     return 0
 
 
+def cmd_create(ns: argparse.Namespace) -> int:
+    ns.detach = True
+    ns.no_start = True
+    ns.wait = False
+    return cmd_up(ns)
+
+
 def _lifecycle(ns: argparse.Namespace, action: str) -> int:
     project = _load(ns)
     containers = _project_containers(project)
@@ -1043,8 +1097,27 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--wait", action="store_true", help="wait for services to be ready")
     p.add_argument("--wait-timeout", type=float, default=60.0, metavar="SECONDS")
     p.add_argument("--remove-orphans", action="store_true")
+    p.add_argument("--no-start", action="store_true")
+    p.add_argument("--no-recreate", action="store_true")
+    p.add_argument("--always-recreate-deps", action="store_true")
+    p.add_argument("--renew-anon-volumes", action="store_true")
     p.add_argument("-t", "--timeout", type=int, default=10)
     p.set_defaults(func=cmd_up)
+
+    p = sub.add_parser("create", help="create services without starting them")
+    p.add_argument("services", nargs="*")
+    p.add_argument("--build", action="store_true")
+    p.add_argument("--no-build", action="store_true")
+    p.add_argument("--pull", choices=("always", "missing", "never"))
+    p.add_argument("--force-recreate", action="store_true")
+    p.add_argument("--no-recreate", action="store_true")
+    p.add_argument("--always-recreate-deps", action="store_true")
+    p.add_argument("--renew-anon-volumes", action="store_true")
+    p.add_argument("--remove-orphans", action="store_true")
+    p.add_argument("--scale", action="append", metavar="SERVICE=N")
+    p.add_argument("--wait-timeout", type=float, default=60.0, metavar="SECONDS")
+    p.add_argument("-t", "--timeout", type=int, default=10)
+    p.set_defaults(func=cmd_create)
 
     p = sub.add_parser("down", help="stop and remove project containers and networks")
     p.add_argument("-v", "--volumes", action="store_true", help="also remove named volumes")

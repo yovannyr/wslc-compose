@@ -184,12 +184,22 @@ Create networks and volumes, build missing images, then create/start containers 
 | `--wait` | wait for running/healthy services before returning |
 | `--wait-timeout SEC` | global readiness timeout (default 60) |
 | `--force-recreate` | recreate containers even if their configuration is unchanged |
+| `--no-recreate` | never recreate existing containers, even when configuration changed |
+| `--always-recreate-deps` | recreate dependencies of explicitly selected services |
+| `--renew-anon-volumes` | recreate generated anonymous volumes with their containers |
 | `--scale SERVICE=N` | override the number of replicas (repeatable) |
 | `--remove-orphans` | remove project containers whose service is no longer declared |
+| `--no-start` | create containers with native `wslc create` without starting them |
 | `-t, --timeout SEC` | stop timeout when recreating (default 10) |
 
 Without `-d`, logs of the started services are followed after startup; `Ctrl+C`
 detaches **without stopping the containers**.
+
+### `create [SERVICE...]`
+
+Creates containers with the native `wslc create` command but does not start them.
+It supports the build, pull, scale, recreate, anonymous-volume, and orphan options
+from `up`. `up --no-start` is equivalent.
 
 ### `down`
 

@@ -21,13 +21,14 @@ def run_args(
     remove: bool = False,
     include_ports: bool = True,
     anonymous_volume_suffix: Optional[str] = None,
+    create_only: bool = False,
 ) -> List[str]:
-    """Arguments for `wslc run` creating one container of a service."""
+    """Arguments for `wslc run` or `wslc create` for one service container."""
     mapper = path_mapper or (lambda p: p)
-    args: List[str] = ["run"]
-    if detach:
+    args: List[str] = ["create" if create_only else "run"]
+    if detach and not create_only:
         args.append("-d")
-    if remove:
+    if remove and not create_only:
         args.append("--rm")
 
     args += ["--name", container_name or project.container_name(service, index)]

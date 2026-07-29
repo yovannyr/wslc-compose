@@ -88,6 +88,15 @@ def test_run_args(tmp_path):
     assert args[args.index("-w") + 1] == "/srv"
 
 
+def test_create_args_use_native_create_without_run_only_flags(tmp_path):
+    project = make_project(tmp_path)
+    args = run_args(project, project.services["web"], create_only=True, remove=True)
+
+    assert args[0] == "create"
+    assert "-d" not in args
+    assert "--rm" not in args
+
+
 def test_build_args(tmp_path):
     project = make_project(tmp_path)
     job = project.services["job"]
