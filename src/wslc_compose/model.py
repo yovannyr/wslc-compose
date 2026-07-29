@@ -52,6 +52,13 @@ class LifecycleHook:
 
 
 @dataclass
+class WatchRule:
+    action: str
+    path: str
+    ignore: List[str] = field(default_factory=list)
+
+
+@dataclass
 class Secret:
     """A top-level, file-backed Compose secret."""
 
@@ -143,6 +150,7 @@ class Service:
     pull_policy: Optional[str] = None
     post_start: List[LifecycleHook] = field(default_factory=list)
     pre_stop: List[LifecycleHook] = field(default_factory=list)
+    watch: List[WatchRule] = field(default_factory=list)
 
     def config_hash(self) -> str:
         blob = json.dumps(self, default=lambda o: o.__dict__, sort_keys=True)

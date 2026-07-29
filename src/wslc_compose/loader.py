@@ -28,6 +28,7 @@ from wslc_compose.model import (
     Service,
     Volume,
     VolumeMount,
+    WatchRule,
 )
 
 COMPOSE_FILENAMES = (
@@ -940,6 +941,39 @@ def _parse_env_files(value: Any, project_dir: str, service_name: str) -> List[st
         result.append(resolved)
     return result
 
+def _parse_watch_rules(
+    value: Any, project_dir: str, service_name: str
+) -> List[WatchRule]:
+    if value is None:
+        return []
+    if not isinstance(value, list):
+        raise ComposeError(f"{service_name}: develop.watch must be a list")
+    rules = []
+    for index, item in enumerate(value):
+        if not isinstance(item, dict) or not item.get("path") or not item.get("action"):
+            raise ComposeError(
+                f"{service_name}: develop.watch[{index}] requires path and action"
+            )
+        action = str(item["action"])
+        if action in ("sync", "sync+restart"):
+            raise ComposeError(
+                f"{service_name}: develop.watch action {action!r} is not supported "
+                "because wslc has no container file-copy operation"
+            )
+        if action not in ("rebuild", "restart"):
+            raise ComposeError(f"{service_name}: invalid develop.watch action {action!r}")
+        path = str(item["path"])
+        path = os.path.abspath(
+            path if os.path.isabs(path) else os.path.join(project_dir, path)
+        )
+        if not os.path.exists(path):
+            raise ComposeError(f"{service_name}: develop.watch path not found: {path}")
+        rules.append(
+            WatchRule(action=action, path=path, ignore=_as_list(item.get("ignore")))
+        )
+    return rules
+
+
 def load_project(
     compose_file: Sequence[str],
     project_name: Optional[str] = None,
@@ -1112,6 +1146,8 @@ def load_project(
         svc.pre_stop = _parse_lifecycle_hooks(
             cfg.get("pre_stop"), str(svc_name), "pre_stop"
         )
+        develop = cfg.get("develop") or {}
+        svc.watch = _parse_watch_rules(develop.get("watch"), project_dir, str(svc_name))
 
         svc.hostname = cfg.get("hostname")
         svc.domainname = cfg.get("domainname")

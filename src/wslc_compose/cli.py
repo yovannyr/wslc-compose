@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import argparse
 import dataclasses
+import fnmatch
 import math
 import os
 import shlex
@@ -1200,6 +1201,97 @@ def cmd_config(ns: argparse.Namespace) -> int:
     print(yaml.safe_dump(dataclasses.asdict(project), sort_keys=False, default_flow_style=False))
     return 0
 
+def _watch_snapshot(path: str, ignore: List[str]) -> Dict[str, tuple]:
+    if os.path.isfile(path):
+        files = [path]
+        root = os.path.dirname(path)
+    else:
+        root = path
+        files = [
+            os.path.join(directory, name)
+            for directory, _, names in os.walk(path)
+            for name in names
+        ]
+    snapshot = {}
+    for file_path in files:
+        relative = os.path.relpath(file_path, root).replace(os.sep, "/")
+        if any(
+            fnmatch.fnmatch(relative, pattern)
+            or fnmatch.fnmatch(os.path.basename(file_path), pattern)
+            for pattern in ignore
+        ):
+            continue
+        try:
+            stat = os.stat(file_path)
+        except OSError:
+            continue
+        snapshot[file_path] = (stat.st_mtime_ns, stat.st_size)
+    return snapshot
+
+
+def _watch_up_namespace(
+    ns: argparse.Namespace, service: str, rebuild: bool
+) -> argparse.Namespace:
+    values = dict(vars(ns))
+    values.update(
+        services=[service],
+        detach=True,
+        build=rebuild,
+        no_build=False,
+        pull=None,
+        force_recreate=rebuild,
+        no_recreate=False,
+        always_recreate_deps=False,
+        renew_anon_volumes=False,
+        no_start=False,
+        scale=[],
+        wait=False,
+        wait_timeout=60.0,
+        remove_orphans=False,
+        abort_on_container_exit=False,
+        abort_on_container_failure=False,
+        exit_code_from=None,
+        timeout=10,
+    )
+    return argparse.Namespace(**values)
+
+
+def cmd_watch(ns: argparse.Namespace) -> int:
+    project = _load(ns)
+    services = _select_services(project, ns.services, ns.profile)
+    watched = [service for service in services if service.watch]
+    if not watched:
+        raise ComposeError("no develop.watch rules found for selected services")
+    if not ns.no_up:
+        for service in watched:
+            cmd_up(_watch_up_namespace(ns, service.name, rebuild=False))
+
+    snapshots = {
+        (service.name, index): _watch_snapshot(rule.path, rule.ignore)
+        for service in watched
+        for index, rule in enumerate(service.watch)
+    }
+    _info("Watching for changes (Ctrl+C to stop)")
+    while True:
+        time.sleep(ns.interval)
+        for service in watched:
+            actions = set()
+            for index, rule in enumerate(service.watch):
+                key = (service.name, index)
+                current = _watch_snapshot(rule.path, rule.ignore)
+                if current != snapshots[key]:
+                    snapshots[key] = current
+                    actions.add(rule.action)
+            if "rebuild" in actions:
+                _info(f"Change detected for {service.name}; rebuilding ...")
+                cmd_up(_watch_up_namespace(ns, service.name, rebuild=True))
+            elif "restart" in actions:
+                _info(f"Change detected for {service.name}; restarting ...")
+                values = dict(vars(ns))
+                values.update(services=[service.name], timeout=10)
+                _lifecycle(argparse.Namespace(**values), "restart")
+
+
 
 def cmd_version(ns: argparse.Namespace) -> int:
     print(f"wslc-compose {__version__}")
@@ -1389,6 +1481,13 @@ def build_parser() -> argparse.ArgumentParser:
     output.add_argument("--profiles", action="store_true")
     output.add_argument("-q", "--quiet", action="store_true")
     p.set_defaults(func=cmd_config)
+
+    p = sub.add_parser("watch", help="watch source files and rebuild or restart services")
+    p.add_argument("services", nargs="*")
+    p.add_argument("--no-up", action="store_true")
+    p.add_argument("--interval", type=float, default=0.5)
+    p.set_defaults(func=cmd_watch)
+
 
     p = sub.add_parser("version", help="show version information")
     p.set_defaults(func=cmd_version)

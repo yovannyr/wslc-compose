@@ -312,6 +312,26 @@ container, missing persistent health monitoring, restart policies, external conf
 and build secrets.
 
 ### `version`
+### `watch [SERVICE...]`
+
+Starts selected watched services (unless `--no-up`) and polls their declared
+`develop.watch` paths. Two actions map cleanly to wslc:
+
+```yaml
+services:
+  api:
+    develop:
+      watch:
+        - action: rebuild
+          path: ./src
+          ignore: [bin/**, obj/**]
+        - action: restart
+          path: ./appsettings.json
+```
+
+`rebuild` rebuilds the image and recreates the service; `restart` performs the
+dependency-aware stop/start lifecycle. `--interval SEC` controls polling frequency.
+
 
 Show the wslc-compose and wslc versions.
 
@@ -347,6 +367,7 @@ Show the wslc-compose and wslc versions.
 | `stdin_open`, `tty` | `-i`, `-t` |
 | `name` (top level) | default project name |
 | `pull_policy` | image pull/build decision during `up` and `run` |
+| `develop.watch` (`rebuild`, `restart`) | polling plus build/recreate or restart |
 | repeated `-f` files | specification-aware model merge and resource uniqueness |
 | `include`, `extends` | modular and inherited Compose service models |
 
@@ -743,6 +764,9 @@ behavior is intentional:
 - **`restart:` policies** — no wslc equivalent yet; restart after a reboot is manual:
   `wslc compose up -d`.
 - **Healthchecks are orchestrator-scoped**: `up --wait` and dependency conditions
+- **Watch sync actions** ? `develop.watch` actions `sync` and `sync+restart` are
+  rejected because wslc has no operation for copying changed files into a container.
+  `rebuild` and `restart` remain supported.
   execute checks while wslc-compose is running. There is no persistent daemon health
   state or automatic unhealthy-container restart after the command exits.
 - **One network per container** (see [Networking](#networking)).
