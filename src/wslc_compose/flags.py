@@ -20,6 +20,7 @@ def run_args(
     entrypoint_override: Optional[List[str]] = None,
     remove: bool = False,
     include_ports: bool = True,
+    anonymous_volume_suffix: Optional[str] = None,
 ) -> List[str]:
     """Arguments for `wslc run` creating one container of a service."""
     mapper = path_mapper or (lambda p: p)
@@ -51,6 +52,8 @@ def run_args(
             args += ["--tmpfs", mount.target]
             continue
         source = mount.source or ""
+        if mount.anonymous:
+            source = f"{source}-{anonymous_volume_suffix or index}"
         if mount.type == "bind":
             source = mapper(source)
         spec = f"{source}:{mount.target}"

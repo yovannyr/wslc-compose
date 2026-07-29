@@ -299,13 +299,17 @@ def parse_volume(spec, project_dir: str) -> VolumeMount:
         read_only = bool(spec.get("read_only", False))
         if vtype == "bind" and source:
             source = _resolve_bind_source(source, project_dir)
-        return VolumeMount(vtype, source, target, read_only)
+        return VolumeMount(
+            vtype,
+            source,
+            target,
+            read_only,
+            anonymous=vtype == "volume" and source is None,
+        )
 
     parts = _split_volume_spec(str(spec))
     if len(parts) == 1:
-        raise ComposeError(
-            f"anonymous volumes are not supported by wslc: {spec!r}; name the volume or use a bind mount"
-        )
+        return VolumeMount("volume", None, parts[0], False, True)
     if len(parts) == 2:
         source, target, opts = parts[0], parts[1], ""
     elif len(parts) == 3:
@@ -796,11 +800,17 @@ def load_project(
         # named volumes must be declared
         for mount in svc.volumes:
             if mount.type == "volume":
-                if mount.source not in project.volumes:
+                if mount.anonymous:
+                    target_hash = hashlib.sha256(mount.target.encode()).hexdigest()[:8]
+                    mount.source = (
+                        f"{name}_{svc.name}_anonymous_{target_hash}"
+                    )
+                elif mount.source not in project.volumes:
                     raise ComposeError(
                         f"service {svc_name!r} references undefined volume {mount.source!r}"
                     )
-                mount.source = project.volumes[mount.source].name
+                else:
+                    mount.source = project.volumes[mount.source].name
 
         svc.depends_on, svc.dependencies = _parse_depends_on(cfg.get("depends_on"))
         svc.healthcheck = _parse_healthcheck(cfg.get("healthcheck"), str(svc_name))

@@ -25,6 +25,7 @@ class VolumeMount:
     source: Optional[str]  # host path or volume name (None for tmpfs)
     target: str
     read_only: bool = False
+    anonymous: bool = False
 
 
 @dataclass

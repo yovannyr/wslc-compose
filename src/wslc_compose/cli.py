@@ -322,6 +322,16 @@ def cmd_up(ns: argparse.Namespace) -> int:
         elif engine.ensure_volume(vol.name, dry_run=ns.dry_run):
             _info(f"Volume {vol.name} created")
 
+    for service in services:
+        replicas = scale.get(service.name, service.replicas)
+        for mount in service.volumes:
+            if not mount.anonymous or mount.source is None:
+                continue
+            for index in range(1, replicas + 1):
+                name = f"{mount.source}-{index}"
+                if engine.ensure_volume(name, dry_run=ns.dry_run):
+                    _info(f"Volume {name} created")
+
     for svc in services:
         _prepare_service_image(
             project, svc, build=ns.build, no_build=ns.no_build, pull=ns.pull, dry_run=ns.dry_run
@@ -435,7 +445,9 @@ def _ordered_containers(
     return ordered
 
 
-def _ensure_service_resources(project: Project, service: Service, dry_run: bool) -> None:
+def _ensure_service_resources(
+    project: Project, service: Service, dry_run: bool, anonymous_suffix: str = "1"
+) -> None:
     networks_by_name = {network.name: network for network in project.networks.values()}
     for name in service.networks:
         network = networks_by_name[name]
@@ -448,6 +460,11 @@ def _ensure_service_resources(project: Project, service: Service, dry_run: bool)
     volumes_by_name = {volume.name: volume for volume in project.volumes.values()}
     for mount in service.volumes:
         if mount.type != "volume" or mount.source is None:
+            continue
+        if mount.anonymous:
+            name = f"{mount.source}-{anonymous_suffix}"
+            if engine.ensure_volume(name, dry_run=dry_run):
+                _info(f"Volume {name} created")
             continue
         volume = volumes_by_name[mount.source]
         if volume.external:
@@ -476,7 +493,11 @@ def cmd_run(ns: argparse.Namespace) -> int:
         if cmd_up(dependency_ns) != 0:
             return 1
 
-    _ensure_service_resources(project, service, ns.dry_run)
+    run_suffix = uuid.uuid4().hex[:8]
+    container_name = ns.name or (
+        f"{project.name}-{service.name}-run-{run_suffix}"
+    )
+    _ensure_service_resources(project, service, ns.dry_run, run_suffix)
     _prepare_service_image(
         project,
         service,
@@ -502,9 +523,6 @@ def cmd_run(ns: argparse.Namespace) -> int:
     if command[:1] == ["--"]:
         command = command[1:]
     entrypoint = shlex.split(ns.entrypoint) if ns.entrypoint is not None else None
-    container_name = ns.name or (
-        f"{project.name}-{service.name}-run-{uuid.uuid4().hex[:8]}"
-    )
     args = flags.run_args(
         project,
         one_off,
@@ -515,6 +533,7 @@ def cmd_run(ns: argparse.Namespace) -> int:
         entrypoint_override=entrypoint,
         remove=ns.rm,
         include_ports=ns.service_ports,
+        anonymous_volume_suffix=run_suffix,
     )
     result = engine.run(args, check=False, dry_run=ns.dry_run)
     return result.returncode
@@ -550,6 +569,22 @@ def cmd_down(ns: argparse.Namespace) -> int:
                     engine.run(["volume", "remove", vol.name], capture=True, dry_run=ns.dry_run)
                 except WslcError:
                     _err(f"warning: could not remove volume {vol.name}")
+        anonymous_prefixes = {
+            mount.source + "-"
+            for service in project.services.values()
+            for mount in service.volumes
+            if mount.anonymous and mount.source is not None
+        }
+        for volume_name in existing_volumes:
+            if not any(volume_name.startswith(prefix) for prefix in anonymous_prefixes):
+                continue
+            _info(f"Removing volume {volume_name}")
+            try:
+                engine.run(
+                    ["volume", "remove", volume_name], capture=True, dry_run=ns.dry_run
+                )
+            except WslcError:
+                _err(f"warning: could not remove volume {volume_name}")
     return 0
 
 
