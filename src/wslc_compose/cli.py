@@ -5,11 +5,13 @@ from __future__ import annotations
 import argparse
 import dataclasses
 import os
+import shlex
 import signal
 import subprocess
 import sys
 import threading
 import time
+import uuid
 from typing import Dict, List, Optional
 
 import yaml
@@ -407,6 +409,91 @@ def cmd_up(ns: argparse.Namespace) -> int:
     return _follow_logs(project, service_names=[s.name for s in services], follow=True)
 
 
+def _ensure_service_resources(project: Project, service: Service, dry_run: bool) -> None:
+    networks_by_name = {network.name: network for network in project.networks.values()}
+    for name in service.networks:
+        network = networks_by_name[name]
+        if network.external:
+            if name not in engine.network_names():
+                raise ComposeError(f"external network {name!r} not found")
+        elif engine.ensure_network(name, dry_run=dry_run):
+            _info(f"Network {name} created")
+
+    volumes_by_name = {volume.name: volume for volume in project.volumes.values()}
+    for mount in service.volumes:
+        if mount.type != "volume" or mount.source is None:
+            continue
+        volume = volumes_by_name[mount.source]
+        if volume.external:
+            if volume.name not in engine.volume_names():
+                raise ComposeError(f"external volume {volume.name!r} not found")
+        elif engine.ensure_volume(volume.name, dry_run=dry_run):
+            _info(f"Volume {volume.name} created")
+
+
+def cmd_run(ns: argparse.Namespace) -> int:
+    project = _load(ns)
+    if ns.service not in project.services:
+        raise ComposeError(f"no such service: {ns.service}")
+    service = project.services[ns.service]
+
+    if service.depends_on and not ns.no_deps:
+        dependency_ns = argparse.Namespace(**vars(ns))
+        dependency_ns.services = list(service.depends_on)
+        dependency_ns.detach = True
+        dependency_ns.force_recreate = False
+        dependency_ns.scale = []
+        dependency_ns.timeout = 10
+        dependency_ns.wait = True
+        dependency_ns.build = ns.build
+        dependency_ns.no_build = ns.no_build
+        if cmd_up(dependency_ns) != 0:
+            return 1
+
+    _ensure_service_resources(project, service, ns.dry_run)
+    _prepare_service_image(
+        project,
+        service,
+        build=ns.build,
+        no_build=ns.no_build,
+        pull=ns.pull,
+        dry_run=ns.dry_run,
+    )
+
+    environment = dict(service.environment)
+    for item in ns.env or []:
+        key, separator, value = item.partition("=")
+        if not key:
+            raise ComposeError(f"invalid environment override: {item!r}")
+        environment[key] = value if separator else None
+    one_off = dataclasses.replace(
+        service,
+        environment=environment,
+        tty=service.tty and not ns.no_tty,
+    )
+
+    command = list(ns.command)
+    if command[:1] == ["--"]:
+        command = command[1:]
+    entrypoint = shlex.split(ns.entrypoint) if ns.entrypoint is not None else None
+    container_name = ns.name or (
+        f"{project.name}-{service.name}-run-{uuid.uuid4().hex[:8]}"
+    )
+    args = flags.run_args(
+        project,
+        one_off,
+        detach=ns.detach,
+        path_mapper=engine.to_host_path,
+        container_name=container_name,
+        command_override=command or None,
+        entrypoint_override=entrypoint,
+        remove=ns.rm,
+        include_ports=ns.service_ports,
+    )
+    result = engine.run(args, check=False, dry_run=ns.dry_run)
+    return result.returncode
+
+
 def cmd_down(ns: argparse.Namespace) -> int:
     project = _load(ns)
     containers = _project_containers(project)
@@ -683,6 +770,23 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("-n", "--tail", type=int)
     p.add_argument("-t", "--timestamps", action="store_true")
     p.set_defaults(func=cmd_logs)
+
+    p = sub.add_parser("run", help="run a one-off command for a service")
+    p.add_argument("-d", "--detach", action="store_true")
+    p.add_argument("--name")
+    p.add_argument("--rm", action="store_true", help="remove the container after it exits")
+    p.add_argument("--no-deps", action="store_true", help="do not start dependencies")
+    p.add_argument("--service-ports", action="store_true")
+    p.add_argument("-T", "--no-tty", action="store_true")
+    p.add_argument("-e", "--env", action="append")
+    p.add_argument("--entrypoint")
+    p.add_argument("--pull", choices=("always", "missing", "never"))
+    p.add_argument("--build", action="store_true")
+    p.add_argument("--no-build", action="store_true")
+    p.add_argument("--wait-timeout", type=float, default=60.0, metavar="SECONDS")
+    p.add_argument("service")
+    p.add_argument("command", nargs=argparse.REMAINDER)
+    p.set_defaults(func=cmd_run)
 
     p = sub.add_parser("exec", help="run a command in a service container")
     p.add_argument("service")
