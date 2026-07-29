@@ -13,6 +13,8 @@ import yaml
 from wslc_compose.interpolation import interpolate_tree
 from wslc_compose.model import (
     BuildConfig,
+    Dependency,
+    Healthcheck,
     Network,
     PortMapping,
     Project,
@@ -33,7 +35,6 @@ COMPOSE_FILENAMES = (
 # Compose keys the current wslc runtime cannot enforce. Ignoring these keys changes
 # container semantics, so the CLI rejects them unless compatibility mode is requested.
 UNSUPPORTED_KEYS = {
-    "healthcheck": "healthchecks are not supported by wslc; depends_on conditions fall back to 'started'",
     "cap_add": "capabilities are not configurable with wslc",
     "cap_drop": "capabilities are not configurable with wslc",
     "privileged": "privileged mode is not supported by wslc",
@@ -430,22 +431,93 @@ def _parse_service_secrets(
     return mounts, warnings
 
 
-def _parse_depends_on(value) -> Tuple[List[str], List[str]]:
-    warnings: List[str] = []
+_DURATION_RE = re.compile(r"(\d+(?:\.\d+)?)(ns|us|ms|s|m|h)")
+_DURATION_FACTORS = {
+    "ns": 0.000000001,
+    "us": 0.000001,
+    "ms": 0.001,
+    "s": 1.0,
+    "m": 60.0,
+    "h": 3600.0,
+}
+
+
+def parse_duration(value: Any, what: str) -> float:
+    if isinstance(value, (int, float)):
+        return float(value)
+    text = str(value)
+    total = 0.0
+    position = 0
+    for match in _DURATION_RE.finditer(text):
+        if match.start() != position:
+            raise ComposeError(f"{what}: invalid duration {value!r}")
+        total += float(match.group(1)) * _DURATION_FACTORS[match.group(2)]
+        position = match.end()
+    if position != len(text) or not text:
+        raise ComposeError(f"{what}: invalid duration {value!r}")
+    return total
+
+
+def _parse_healthcheck(value: Any, service_name: str) -> Optional[Healthcheck]:
     if value is None:
-        return [], warnings
+        return None
+    if not isinstance(value, dict):
+        raise ComposeError(f"{service_name}: healthcheck must be a mapping")
+    if value.get("disable"):
+        return None
+    test = value.get("test")
+    if isinstance(test, str):
+        test = ["CMD-SHELL", test]
+    elif isinstance(test, list):
+        test = [str(part) for part in test]
+    else:
+        raise ComposeError(f"{service_name}: healthcheck.test must be a string or list")
+    if not test or test[0] not in ("CMD", "CMD-SHELL", "NONE"):
+        raise ComposeError(
+            f"{service_name}: healthcheck.test must start with CMD, CMD-SHELL, or NONE"
+        )
+    if test[0] == "NONE":
+        return None
+    retries = int(value.get("retries", 3))
+    if retries < 1:
+        raise ComposeError(f"{service_name}: healthcheck.retries must be at least 1")
+    return Healthcheck(
+        test=test,
+        interval=parse_duration(value.get("interval", "30s"), "healthcheck.interval"),
+        timeout=parse_duration(value.get("timeout", "30s"), "healthcheck.timeout"),
+        retries=retries,
+        start_period=parse_duration(
+            value.get("start_period", "0s"), "healthcheck.start_period"
+        ),
+    )
+
+
+def _parse_depends_on(value) -> Tuple[List[str], Dict[str, Dependency]]:
+    if value is None:
+        return [], {}
     if isinstance(value, list):
-        return [str(v) for v in value], warnings
+        names = [str(v) for v in value]
+        return names, {name: Dependency() for name in names}
     if isinstance(value, dict):
         deps = []
+        conditions = {}
         for name, cfg in value.items():
-            deps.append(str(name))
+            name = str(name)
+            deps.append(name)
             condition = (cfg or {}).get("condition", "service_started")
-            if condition not in ("service_started",):
-                warnings.append(
-                    f"depends_on condition {condition!r} on {name!r} is treated as service_started"
+            if condition not in (
+                "service_started",
+                "service_healthy",
+                "service_completed_successfully",
+            ):
+                raise ComposeError(
+                    f"depends_on condition {condition!r} on {name!r} is invalid"
                 )
-        return deps, warnings
+            conditions[name] = Dependency(
+                condition=condition,
+                required=bool((cfg or {}).get("required", True)),
+            )
+        return deps, conditions
     raise ComposeError("depends_on: expected list or mapping")
 
 
@@ -604,8 +676,8 @@ def load_project(
                     )
                 mount.source = project.volumes[mount.source].name
 
-        svc.depends_on, dep_warnings = _parse_depends_on(cfg.get("depends_on"))
-        project.warnings.extend(f"{svc_name}: {w}" for w in dep_warnings)
+        svc.depends_on, svc.dependencies = _parse_depends_on(cfg.get("depends_on"))
+        svc.healthcheck = _parse_healthcheck(cfg.get("healthcheck"), str(svc_name))
 
         svc.hostname = cfg.get("hostname")
         svc.domainname = cfg.get("domainname")
@@ -661,4 +733,20 @@ def load_project(
 
         project.services[svc.name] = svc
 
+    for service in project.services.values():
+        for dependency_name, dependency in service.dependencies.items():
+            dependency_service = project.services.get(dependency_name)
+            if dependency_service is None:
+                raise ComposeError(
+                    f"service {service.name!r} depends on undefined service "
+                    f"{dependency_name!r}"
+                )
+            if (
+                dependency.condition == "service_healthy"
+                and dependency_service.healthcheck is None
+            ):
+                raise ComposeError(
+                    f"service {service.name!r} requires {dependency_name!r} to be healthy, "
+                    "but it has no healthcheck"
+                )
     return project

@@ -28,6 +28,21 @@ class VolumeMount:
 
 
 @dataclass
+class Healthcheck:
+    test: List[str]
+    interval: float = 30.0
+    timeout: float = 30.0
+    retries: int = 3
+    start_period: float = 0.0
+
+
+@dataclass
+class Dependency:
+    condition: str = "service_started"
+    required: bool = True
+
+
+@dataclass
 class Secret:
     """A top-level, file-backed Compose secret."""
 
@@ -76,6 +91,8 @@ class Service:
     networks: List[str] = field(default_factory=list)  # project-resolved network names
     network_aliases: Dict[str, List[str]] = field(default_factory=dict)
     depends_on: List[str] = field(default_factory=list)
+    dependencies: Dict[str, Dependency] = field(default_factory=dict)
+    healthcheck: Optional[Healthcheck] = None
     hostname: Optional[str] = None
     domainname: Optional[str] = None
     dns: List[str] = field(default_factory=list)

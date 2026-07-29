@@ -94,12 +94,24 @@ def run(
     capture: bool = False,
     check: bool = True,
     dry_run: bool = False,
+    timeout: Optional[float] = None,
 ) -> subprocess.CompletedProcess:
     argv = [find_wslc()] + args
     if dry_run:
         print("+ " + " ".join(argv))
         return subprocess.CompletedProcess(argv, 0, "", "")
-    proc = subprocess.run(argv, capture_output=capture, text=capture, check=False)
+    try:
+        proc = subprocess.run(
+            argv,
+            capture_output=capture,
+            text=capture,
+            check=False,
+            timeout=timeout,
+        )
+    except subprocess.TimeoutExpired as exc:
+        if check:
+            raise WslcError(f"wslc {' '.join(args[:2])} timed out after {timeout:g}s") from exc
+        return subprocess.CompletedProcess(argv, 124, exc.stdout or "", exc.stderr or "")
     if check and proc.returncode != 0:
         detail = (proc.stderr or "").strip() if capture else ""
         raise WslcError(

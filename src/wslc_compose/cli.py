@@ -9,6 +9,7 @@ import signal
 import subprocess
 import sys
 import threading
+import time
 from typing import Dict, List, Optional
 
 import yaml
@@ -143,6 +144,77 @@ def _print_table(rows: List[List[str]], headers: List[str]) -> None:
 # --- commands ----------------------------------------------------------------
 
 
+def _wait_for_container_health(
+    container_name: str,
+    service: Service,
+    deadline: float,
+) -> None:
+    healthcheck = service.healthcheck
+    if healthcheck is None:
+        return
+    started_at = time.monotonic()
+    failures = 0
+    while True:
+        remaining = deadline - time.monotonic()
+        if remaining <= 0:
+            raise ComposeError(f"timed out waiting for {container_name} to become healthy")
+
+        if healthcheck.test[0] == "CMD-SHELL":
+            if len(healthcheck.test) != 2:
+                raise ComposeError(
+                    f"{service.name}: CMD-SHELL healthcheck requires one command string"
+                )
+            command = ["/bin/sh", "-c", healthcheck.test[1]]
+        else:
+            command = healthcheck.test[1:]
+        result = engine.run(
+            ["exec", container_name] + command,
+            capture=True,
+            check=False,
+            timeout=min(healthcheck.timeout, remaining),
+        )
+        if result.returncode == 0:
+            return
+        if time.monotonic() - started_at >= healthcheck.start_period:
+            failures += 1
+            if failures >= healthcheck.retries:
+                raise ComposeError(
+                    f"container {container_name} is unhealthy after {failures} attempts"
+                )
+        time.sleep(min(healthcheck.interval, max(0.0, deadline - time.monotonic())))
+
+
+def _wait_for_service_health(
+    project: Project, service: Service, deadline: float, replicas: Optional[int] = None
+) -> None:
+    for index in range(1, (replicas or service.replicas) + 1):
+        _wait_for_container_health(project.container_name(service, index), service, deadline)
+
+
+def _wait_for_service_completion(
+    project: Project, service: Service, deadline: float, replicas: Optional[int] = None
+) -> None:
+    for index in range(1, (replicas or service.replicas) + 1):
+        container_name = project.container_name(service, index)
+        while True:
+            if time.monotonic() >= deadline:
+                raise ComposeError(f"timed out waiting for {container_name} to complete")
+            data = engine.inspect(container_name)
+            if data is None:
+                raise ComposeError(f"cannot inspect dependency container {container_name}")
+            state = data.get("State") or {}
+            if not state.get("Running"):
+                exit_code = state.get("ExitCode")
+                if exit_code is None:
+                    raise ComposeError(
+                        f"wslc inspect did not report an exit code for {container_name}"
+                    )
+                if int(exit_code) != 0:
+                    raise ComposeError(f"container {container_name} exited with code {exit_code}")
+                break
+            time.sleep(min(0.5, max(0.0, deadline - time.monotonic())))
+
+
 def cmd_up(ns: argparse.Namespace) -> int:
     project = _load(ns)
     services = _select_services(project, ns.services, ns.profile)
@@ -156,6 +228,8 @@ def cmd_up(ns: argparse.Namespace) -> int:
         if not count.isdigit():
             raise ComposeError(f"invalid --scale value: {spec!r} (expected service=N)")
         scale[name] = int(count)
+
+    readiness_deadline = time.monotonic() + ns.wait_timeout
 
     needed_networks = {n for svc in services for n in svc.networks}
     for net in project.networks.values():
@@ -190,8 +264,32 @@ def cmd_up(ns: argparse.Namespace) -> int:
 
     existing = {c["name"]: c for c in _project_containers(project)} if not ns.dry_run else {}
     started: List[str] = []
+    ready_dependencies = set()
 
     for svc in services:
+        if not ns.dry_run:
+            for dependency_name, dependency in svc.dependencies.items():
+                readiness_key = (dependency_name, dependency.condition)
+                if readiness_key in ready_dependencies:
+                    continue
+                dependency_service = project.services[dependency_name]
+                dependency_replicas = scale.get(
+                    dependency_name, dependency_service.replicas
+                )
+                try:
+                    if dependency.condition == "service_healthy":
+                        _wait_for_service_health(
+                            project, dependency_service, readiness_deadline, dependency_replicas
+                        )
+                    elif dependency.condition == "service_completed_successfully":
+                        _wait_for_service_completion(
+                            project, dependency_service, readiness_deadline, dependency_replicas
+                        )
+                except ComposeError:
+                    if dependency.required:
+                        raise
+                    _err(f"warning: optional dependency {dependency_name} is not ready")
+                ready_dependencies.add(readiness_key)
         replicas = scale.get(svc.name, svc.replicas)
         if svc.container_name and replicas > 1:
             raise ComposeError(
@@ -234,7 +332,14 @@ def cmd_up(ns: argparse.Namespace) -> int:
                 engine.run(["remove", "-f", name], capture=True, dry_run=ns.dry_run)
                 existing.pop(name)
 
-    if ns.detach or ns.dry_run or not started:
+    if ns.wait and not ns.dry_run:
+        for service in services:
+            if service.healthcheck is not None:
+                _wait_for_service_health(
+                    project, service, readiness_deadline, scale.get(service.name)
+                )
+
+    if ns.wait or ns.detach or ns.dry_run or not started:
         return 0
     _info("Attaching to logs (Ctrl+C to detach; containers keep running)")
     return _follow_logs(project, service_names=[s.name for s in services], follow=True)
@@ -493,6 +598,8 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--build", action="store_true", help="rebuild images before starting")
     p.add_argument("--force-recreate", action="store_true")
     p.add_argument("--scale", action="append", metavar="SERVICE=N")
+    p.add_argument("--wait", action="store_true", help="wait for services to be ready")
+    p.add_argument("--wait-timeout", type=float, default=60.0, metavar="SECONDS")
     p.add_argument("-t", "--timeout", type=int, default=10)
     p.set_defaults(func=cmd_up)
 
