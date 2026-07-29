@@ -14,7 +14,9 @@ and a Docker-compatible API endpoint in [microsoft/WSL#40976](https://github.com
 `wslc-compose` fills that gap **today**: point it at the `docker-compose.yml` /
 `compose.yaml` you already use with Docker or Podman, and it drives `wslc` for you —
 networks with DNS, named volumes, bind mounts, dependency ordering, project-scoped
-naming, config-drift detection and scaling included.
+naming, config-drift detection and scaling included. It also supports Compose model
+merging, `include`/`extends`, startup health checks, file-backed secrets and configs,
+pull policies, anonymous volumes, and one-off service commands.
 
 ---
 
@@ -27,7 +29,12 @@ naming, config-drift detection and scaling included.
 - [Migrating an existing wslc setup](#migrating-an-existing-wslc-setup)
 - [Command reference](#command-reference)
 - [Compose file support](#compose-file-support)
+- [Compose model composition](#compose-model-composition)
 - [Variable interpolation](#variable-interpolation)
+- [Readiness and dependency conditions](#readiness-and-dependency-conditions)
+- [Image policies and one-off jobs](#image-policies-and-one-off-jobs)
+- [Configs](#configs)
+- [Secrets](#secrets)
 - [Naming conventions and labels](#naming-conventions-and-labels)
 - [How `up` decides what to do](#how-up-decides-what-to-do)
 - [Networking](#networking)
@@ -189,7 +196,7 @@ Stop and remove all of the project's containers, then remove its non-external ne
 
 | Option | Description |
 |---|---|
-| `-v, --volumes` | also remove the project's non-external named volumes |
+| `-v, --volumes` | also remove non-external named and generated anonymous volumes |
 | `-t, --timeout SEC` | stop timeout (default 10) |
 
 ### `ps [SERVICE...]`
@@ -227,8 +234,21 @@ A TTY is allocated automatically when stdin is a terminal.
 ### `run [OPTIONS] SERVICE [COMMAND...]`
 
 Run a one-off service command. Dependencies start automatically unless `--no-deps`
-is used. Supports `--rm`, `--name`, `--entrypoint`, `-e`, `--service-ports`,
-`--pull`, `--build`, and `--no-build`.
+is used. The one-off container receives the service environment, mounts, secrets,
+configs, network, user, working directory, and resource limits.
+
+| Option | Description |
+|---|---|
+| `--rm` | remove the one-off container after it exits |
+| `--name NAME` | choose an explicit container name |
+| `--no-deps` | do not start service dependencies |
+| `--service-ports` | publish the service's declared ports |
+| `-e, --env K=V` | add or override environment variables (repeatable) |
+| `--entrypoint COMMAND` | override the image/service entrypoint |
+| `-d, --detach` | run the one-off container in the background |
+| `-T, --no-tty` | disable the service's TTY setting |
+| `--pull POLICY` | override `pull_policy` |
+| `--build` / `--no-build` | force or prohibit image builds |
 
 ### Utility commands
 
@@ -257,6 +277,11 @@ Build every selected service that has a `build:` section, tagging the result
 
 Print the fully resolved configuration (after interpolation, normalization, name
 prefixing) as YAML — useful to debug what wslc-compose actually sees.
+
+`config --capabilities` does not require a Compose file. It prints the options the
+current wslc runtime cannot honor and hard runtime boundaries such as one network per
+container, missing persistent health monitoring, restart policies, external configs,
+and build secrets.
 
 ### `version`
 
@@ -305,6 +330,77 @@ scaling a service that sets `container_name`, external configs, unsupported secr
 sources, and build-time secrets. `config --capabilities` prints the current runtime
 capability report without requiring a Compose file.
 
+## Compose model composition
+
+### Multiple `-f` files
+
+Repeat `-f` to apply development, CI, or machine-specific overrides:
+
+```powershell
+wslc-compose `
+  -f compose.yaml `
+  -f compose.development.yaml `
+  config
+```
+
+Mappings are merged recursively. Scalar values are replaced by the later file;
+`command`, `entrypoint`, and `healthcheck.test` are replaced rather than appended.
+Ports, volumes, secrets, and configs use their Compose uniqueness keys, so an
+override of the same container target replaces the original resource. Other lists
+are appended. Relative paths in an `-f` stack are resolved from the first file's
+project directory.
+
+### `include`
+
+Included Compose applications contribute services and top-level resources:
+
+```yaml
+include:
+  - ./database/compose.yaml
+  - path: ./workers/compose.yaml
+    project_directory: ./workers/runtime
+    env_file: ./workers.env
+
+services:
+  api:
+    image: example/api
+```
+
+Short syntax resolves relative paths from the included file's directory. Long syntax
+can set a separate `project_directory`, an include-specific `env_file`, or a list of
+paths. Recursive includes are supported; include cycles fail with an explicit error.
+
+### `extends`
+
+A service can inherit another service from the same file:
+
+```yaml
+services:
+  app-base:
+    image: example/app
+    environment:
+      LOG_LEVEL: information
+
+  app:
+    extends: app-base
+    environment:
+      LOG_LEVEL: debug
+```
+
+External Compose files use long syntax:
+
+```yaml
+services:
+  app:
+    extends:
+      file: ./common-services.yaml
+      service: app-base
+```
+
+The child uses the same Compose merge rules as repeated `-f` files. Referenced
+networks, volumes, secrets, and configs must still exist in the resulting project.
+Circular inheritance is rejected.
+
 ## Variable interpolation
 
 Identical to docker compose:
@@ -320,6 +416,123 @@ Identical to docker compose:
 
 Precedence: process environment > `.env` file (in the project directory, or
 `--env-file`). Shell constructs like `$(date)` are left untouched.
+
+## Readiness and dependency conditions
+
+Healthchecks are executed through `wslc exec` while `up` is orchestrating the
+project. Both exec and shell forms are supported, together with Compose durations:
+
+```yaml
+services:
+  postgres:
+    image: postgres:17
+    healthcheck:
+      test: [CMD-SHELL, "pg_isready -U postgres"]
+      interval: 2s
+      timeout: 1s
+      retries: 20
+      start_period: 5s
+
+  migrate:
+    image: example/migrator
+    depends_on:
+      postgres:
+        condition: service_healthy
+
+  api:
+    image: example/api
+    depends_on:
+      migrate:
+        condition: service_completed_successfully
+      postgres:
+        condition: service_healthy
+        required: true
+```
+
+Supported conditions:
+
+- `service_started`: dependency containers have been started; this is the default.
+- `service_healthy`: every dependency replica must pass its healthcheck.
+- `service_completed_successfully`: every dependency replica must stop with exit code 0.
+- `required: false`: report an optional dependency failure as a warning and continue.
+
+Use `up --wait --wait-timeout 120` to wait for all selected services with a declared
+healthcheck. This is startup/readiness orchestration only: wslc has no daemon that can
+continue evaluating health or restart unhealthy containers after wslc-compose exits.
+
+## Image policies and one-off jobs
+
+`pull_policy` controls image preparation during `up` and `run`:
+
+| Policy | Behavior |
+|---|---|
+| `always` | pull an explicitly named image before starting |
+| `missing` / `if_not_present` | reuse local images; refresh `latest`; otherwise pull or build |
+| `never` | fail if the named image is absent locally |
+| `build` | build the service image even when it already exists |
+
+Command-line `--pull always|missing|never` overrides the service policy. `--build`
+forces builds, while `--no-build` prevents accidental source builds and fails when a
+required build-only image is missing.
+
+One-off jobs reuse the normalized service model. This is useful for migrations,
+tests, maintenance, or runtime NuGet restore operations:
+
+```powershell
+wslc-compose run --rm migrate dotnet ef database update
+
+wslc-compose run `
+  --rm `
+  --no-deps `
+  restore `
+  dotnet restore --configfile /run/secrets/nuget_config
+```
+
+Service ports are not published by default for one-off containers; opt in with
+`--service-ports`. Anonymous volumes receive a unique suffix so concurrent one-off
+jobs do not share their per-container data.
+
+## Configs
+
+Compose configs are exposed as read-only files without rebuilding the image. File,
+inline content, and environment-variable sources are supported:
+
+```yaml
+services:
+  api:
+    image: example/api
+    configs:
+      - app_settings
+      - source: feature_flags
+        target: /app/config/features.json
+
+configs:
+  app_settings:
+    file: ./appsettings.Production.json
+
+  feature_flags:
+    content: |
+      {
+        "newCheckout": ${NEW_CHECKOUT:-false}
+      }
+
+  simple_value:
+    environment: SIMPLE_CONFIG_VALUE
+```
+
+Short syntax mounts to `/<config-name>`. Long syntax accepts an absolute `target` or
+a filename under `/`. `content` and `environment` values are materialized into stable
+host-side files and mounted read-only; only the path enters the service model and
+config hash.
+
+Current boundaries:
+
+- `external: true` is rejected because wslc has no config object store.
+- `uid`, `gid`, and `mode` are accepted with a warning because wslc file mounts cannot
+  enforce them.
+- Configs, secrets, and ordinary bind/volume mounts all consume the same limited wslc
+  session mount budget.
+- A config target cannot overlap another config, secret, or volume target.
 
 ## Naming conventions and labels
 
@@ -359,6 +572,11 @@ Changing anything in the service definition (image, env, ports, mounts, ...) or 
 interpolated variables therefore triggers a clean recreation of just the affected
 services on the next `up`.
 
+Before container reconciliation, each service image is prepared according to
+`pull_policy`, `--pull`, `--build`, and `--no-build`. Services are then processed in
+dependency order. Readiness conditions are evaluated before dependents start; `down`,
+`stop`, and `restart` use reverse dependency order and honor `stop_grace_period`.
+
 ## Networking
 
 - Services without a `networks:` key join the project's `default` network
@@ -375,6 +593,10 @@ services on the next `up`.
 
 - **Named volumes** are created on demand (`wslc volume create`) and removed by
   `down -v` (external ones never).
+- **Anonymous volumes** such as `- /data` are emulated with stable generated names
+  derived from project, service, and target. Each replica gets its own suffixed wslc
+  volume; one-off `run` containers receive a unique suffix. `down -v` removes only
+  generated volumes matching the project's anonymous-volume prefixes.
 - **Bind mounts**: relative paths are resolved against the compose file's directory,
   `~` is expanded. wslc expects **Windows host paths**, so when running inside WSL,
   Linux paths are translated automatically with `wslpath -w`
@@ -443,7 +665,9 @@ Current boundaries:
 
 ## Known wslc preview limitations
 
-`wslc` is a public preview; `wslc-compose` warns at load time rather than failing:
+`wslc` is a public preview. `wslc-compose` rejects unsupported runtime and security
+semantics by default. Use `--ignore-unsupported` only when degraded, warning-only
+behavior is intentional:
 
 - **`restart:` policies** — no wslc equivalent yet; restart after a reboot is manual:
   `wslc compose up -d`.
