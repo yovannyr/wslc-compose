@@ -286,6 +286,28 @@ def _wait_for_service_completion(
             time.sleep(min(0.5, max(0.0, deadline - time.monotonic())))
 
 
+def _run_lifecycle_hooks(
+    container_name: str, hooks: list, hook_name: str, dry_run: bool
+) -> None:
+    for index, hook in enumerate(hooks, 1):
+        _info(f"Running {hook_name} hook {index} for {container_name} ...")
+        args = ["exec"]
+        if hook.user:
+            args += ["-u", hook.user]
+        if hook.working_dir:
+            args += ["-w", hook.working_dir]
+        for key, value in hook.environment.items():
+            args += ["-e", key if value is None else f"{key}={value}"]
+        args.append(container_name)
+        args.extend(hook.command)
+        result = engine.run(args, check=False, dry_run=dry_run)
+        if result.returncode != 0:
+            raise ComposeError(
+                f"{container_name}: {hook_name} hook {index} exited with "
+                f"code {result.returncode}"
+            )
+
+
 def cmd_up(ns: argparse.Namespace) -> int:
     project = _load(ns)
     services = _select_services(project, ns.services, ns.profile)
@@ -385,6 +407,9 @@ def cmd_up(ns: argparse.Namespace) -> int:
                     _info(f"Starting {cname} ...")
                     engine.run_retried(["start", cname], dry_run=ns.dry_run)
                     started.append(cname)
+                    _run_lifecycle_hooks(
+                        cname, svc.post_start, "post_start", ns.dry_run
+                    )
                     continue
                 _info(f"Recreating {cname} ...")
                 if current["running"]:
@@ -401,6 +426,7 @@ def cmd_up(ns: argparse.Namespace) -> int:
                 dry_run=ns.dry_run,
             )
             started.append(cname)
+            _run_lifecycle_hooks(cname, svc.post_start, "post_start", ns.dry_run)
 
         # drop replicas beyond the requested scale
         for name, leftover in list(existing.items()):
@@ -546,6 +572,11 @@ def cmd_down(ns: argparse.Namespace) -> int:
     containers = _project_containers(project)
     for entry in _ordered_containers(project, containers, reverse=True):
         if entry["running"]:
+            service = project.services.get(entry["service"])
+            if service is not None:
+                _run_lifecycle_hooks(
+                    entry["name"], service.pre_stop, "pre_stop", ns.dry_run
+                )
             _info(f"Stopping {entry['name']} ...")
             engine.run(
                 ["stop", "-t", str(_stop_timeout(project, entry["service"], ns.timeout)), entry["name"]], capture=True, dry_run=ns.dry_run
@@ -846,6 +877,11 @@ def _lifecycle(ns: argparse.Namespace, action: str) -> int:
         for entry in _ordered_containers(project, containers, reverse=True):
             if not entry["running"]:
                 continue
+            service = project.services.get(entry["service"])
+            if service is not None:
+                _run_lifecycle_hooks(
+                    entry["name"], service.pre_stop, "pre_stop", ns.dry_run
+                )
             _info(f"Stopping {entry['name']} ...")
             engine.run(
                 [
@@ -861,6 +897,11 @@ def _lifecycle(ns: argparse.Namespace, action: str) -> int:
         for entry in _ordered_containers(project, containers):
             _info(f"Starting {entry['name']} ...")
             engine.run_retried(["start", entry["name"]], dry_run=ns.dry_run)
+            service = project.services.get(entry["service"])
+            if service is not None:
+                _run_lifecycle_hooks(
+                    entry["name"], service.post_start, "post_start", ns.dry_run
+                )
     return 0
 
 

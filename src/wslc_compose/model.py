@@ -44,6 +44,14 @@ class Dependency:
 
 
 @dataclass
+class LifecycleHook:
+    command: List[str]
+    user: Optional[str] = None
+    working_dir: Optional[str] = None
+    environment: Dict[str, Optional[str]] = field(default_factory=dict)
+
+
+@dataclass
 class Secret:
     """A top-level, file-backed Compose secret."""
 
@@ -133,6 +141,8 @@ class Service:
     profiles: List[str] = field(default_factory=list)
     restart: Optional[str] = None  # accepted but not enforceable by wslc yet
     pull_policy: Optional[str] = None
+    post_start: List[LifecycleHook] = field(default_factory=list)
+    pre_stop: List[LifecycleHook] = field(default_factory=list)
 
     def config_hash(self) -> str:
         blob = json.dumps(self, default=lambda o: o.__dict__, sort_keys=True)

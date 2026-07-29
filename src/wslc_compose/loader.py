@@ -19,6 +19,7 @@ from wslc_compose.model import (
     ConfigMount,
     Dependency,
     Healthcheck,
+    LifecycleHook,
     Network,
     PortMapping,
     Project,
@@ -788,6 +789,40 @@ def _parse_depends_on(value) -> Tuple[List[str], Dict[str, Dependency]]:
     raise ComposeError("depends_on: expected list or mapping")
 
 
+def _parse_lifecycle_hooks(
+    value: Any, service_name: str, hook_name: str
+) -> List[LifecycleHook]:
+    if value is None:
+        return []
+    if not isinstance(value, list):
+        raise ComposeError(f"{service_name}: {hook_name} must be a list")
+    hooks = []
+    for index, item in enumerate(value):
+        if not isinstance(item, dict) or item.get("command") is None:
+            raise ComposeError(
+                f"{service_name}: {hook_name}[{index}] requires a command"
+            )
+        if item.get("privileged"):
+            raise ComposeError(
+                f"{service_name}: {hook_name}[{index}].privileged is not "
+                "supported by wslc"
+            )
+        command = _as_command(item["command"])
+        if not command:
+            raise ComposeError(
+                f"{service_name}: {hook_name}[{index}] command must not be empty"
+            )
+        hooks.append(
+            LifecycleHook(
+                command=command,
+                user=str(item["user"]) if item.get("user") is not None else None,
+                working_dir=item.get("working_dir"),
+                environment=_as_environment(item.get("environment")),
+            )
+        )
+    return hooks
+
+
 def _parse_build(value, project_dir: str, service_name: str) -> BuildConfig:
     if isinstance(value, str):
         return BuildConfig(context=_resolve_bind_source(value, project_dir))
@@ -959,6 +994,12 @@ def load_project(
 
         svc.depends_on, svc.dependencies = _parse_depends_on(cfg.get("depends_on"))
         svc.healthcheck = _parse_healthcheck(cfg.get("healthcheck"), str(svc_name))
+        svc.post_start = _parse_lifecycle_hooks(
+            cfg.get("post_start"), str(svc_name), "post_start"
+        )
+        svc.pre_stop = _parse_lifecycle_hooks(
+            cfg.get("pre_stop"), str(svc_name), "pre_stop"
+        )
 
         svc.hostname = cfg.get("hostname")
         svc.domainname = cfg.get("domainname")

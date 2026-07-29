@@ -309,6 +309,7 @@ Show the wslc-compose and wslc versions.
 | `deploy.replicas` | number of containers (see also `--scale`) |
 | `deploy.resources.limits.cpus` / `.memory`, `cpus`, `mem_limit` | `--cpus`, `-m` |
 | `deploy.resources.reservations.devices` (gpu), `gpus` | `--gpus` |
+| `post_start`, `pre_stop` | ordered lifecycle commands executed with `wslc exec` |
 | `shm_size`, `ulimits`, `stop_signal`, `stop_grace_period` | wslc runtime and stop flags |
 | `hostname`, `domainname`, `dns`, `dns_search`, `dns_opt` | `-h`, `--domainname`, `--dns*` |
 | `user`, `working_dir` | `-u`, `-w` |
@@ -576,6 +577,12 @@ Before container reconciliation, each service image is prepared according to
 `pull_policy`, `--pull`, `--build`, and `--no-build`. Services are then processed in
 dependency order. Readiness conditions are evaluated before dependents start; `down`,
 `stop`, and `restart` use reverse dependency order and honor `stop_grace_period`.
+
+Compose lifecycle hooks are also honored. `post_start` runs after a container is
+created or started, while `pre_stop` runs immediately before a running container is
+stopped by `stop`, `restart`, or `down`. Hook `command`, `user`, `working_dir`, and
+`environment` are supported. Hook failures abort the operation; `privileged: true`
+is rejected because wslc cannot execute privileged commands.
 
 ## Networking
 
