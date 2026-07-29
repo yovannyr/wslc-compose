@@ -29,7 +29,8 @@ COMPOSE_FILENAMES = (
     "docker-compose.yaml",
 )
 
-# compose keys we accept but wslc cannot enforce (yet)
+# Compose keys the current wslc runtime cannot enforce. Ignoring these keys changes
+# container semantics, so the CLI rejects them unless compatibility mode is requested.
 UNSUPPORTED_KEYS = {
     "healthcheck": "healthchecks are not supported by wslc; depends_on conditions fall back to 'started'",
     "cap_add": "capabilities are not configurable with wslc",
@@ -46,6 +47,10 @@ UNSUPPORTED_KEYS = {
     "security_opt": "security_opt is not supported by wslc",
     "logging": "logging drivers are not configurable with wslc",
     "healthcheck_disable": "",
+}
+
+UNSUPPORTED_CAPABILITIES = {
+    key: message for key, message in UNSUPPORTED_KEYS.items() if message
 }
 
 _WIN_PATH_RE = re.compile(r"^[A-Za-z]:[\\/]")
@@ -401,6 +406,7 @@ def load_project(
     compose_file: str,
     project_name: Optional[str] = None,
     env_file: Optional[str] = None,
+    strict_unsupported: bool = False,
 ) -> Project:
     compose_file = os.path.abspath(compose_file)
     project_dir = os.path.dirname(compose_file)
@@ -446,9 +452,16 @@ def load_project(
             raise ComposeError(f"service {svc_name!r} is empty")
         svc = Service(name=str(svc_name))
 
-        for key, message in UNSUPPORTED_KEYS.items():
-            if key in cfg and message:
-                project.warnings.append(f"{svc_name}: {message} (ignoring '{key}')")
+        for key, message in UNSUPPORTED_CAPABILITIES.items():
+            if key not in cfg:
+                continue
+            detail = f"{svc_name}: {message} (unsupported option '{key}')"
+            if strict_unsupported:
+                raise ComposeError(
+                    f"{detail}; remove it or use --ignore-unsupported to accept "
+                    "degraded behavior"
+                )
+            project.warnings.append(f"{detail} (ignoring)")
 
         svc.image = cfg.get("image")
         if "build" in cfg:
@@ -535,9 +548,16 @@ def load_project(
         svc.profiles = _as_list(cfg.get("profiles"))
         svc.restart = cfg.get("restart")
         if svc.restart and svc.restart not in ("no", '"no"'):
-            project.warnings.append(
-                f"{svc_name}: restart policies are not supported by wslc yet (ignoring 'restart: {svc.restart}')"
+            detail = (
+                f"{svc_name}: restart policies are not supported by wslc "
+                f"(unsupported option 'restart: {svc.restart}')"
             )
+            if strict_unsupported:
+                raise ComposeError(
+                    f"{detail}; remove it or use --ignore-unsupported to accept "
+                    "degraded behavior"
+                )
+            project.warnings.append(f"{detail} (ignoring)")
 
         raw_ulimits = cfg.get("ulimits")
         if isinstance(raw_ulimits, dict):

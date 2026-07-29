@@ -171,6 +171,37 @@ services:
     assert "restart" in text
 
 
+def test_unsupported_runtime_key_rejected_in_strict_mode(tmp_path):
+    (tmp_path / "compose.yaml").write_text(
+        """
+services:
+  a:
+    image: x
+    read_only: true
+"""
+    )
+
+    with pytest.raises(
+        ComposeError,
+        match=r"unsupported option 'read_only'.*--ignore-unsupported",
+    ):
+        load_project(str(tmp_path / "compose.yaml"), strict_unsupported=True)
+
+
+def test_restart_policy_rejected_in_strict_mode(tmp_path):
+    (tmp_path / "compose.yaml").write_text(
+        """
+services:
+  a:
+    image: x
+    restart: always
+"""
+    )
+
+    with pytest.raises(ComposeError, match=r"unsupported option 'restart: always'"):
+        load_project(str(tmp_path / "compose.yaml"), strict_unsupported=True)
+
+
 def test_file_secrets_short_and_long_syntax(tmp_path):
     (tmp_path / "nuget.config").write_text("secret-value-must-not-leak")
     (tmp_path / "feed.token").write_text("token-value-must-not-leak")

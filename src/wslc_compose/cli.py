@@ -22,7 +22,12 @@ from wslc_compose import (
     flags,
 )
 from wslc_compose.engine import WslcError
-from wslc_compose.loader import ComposeError, find_compose_file, load_project
+from wslc_compose.loader import (
+    UNSUPPORTED_CAPABILITIES,
+    ComposeError,
+    find_compose_file,
+    load_project,
+)
 from wslc_compose.model import Project, Service
 
 PROTOCOLS = {6: "tcp", 17: "udp"}
@@ -60,7 +65,12 @@ def _locate_compose_file(explicit: Optional[str]) -> str:
 
 def _load(ns: argparse.Namespace) -> Project:
     compose_file = _locate_compose_file(ns.file)
-    project = load_project(compose_file, project_name=ns.project_name, env_file=ns.env_file)
+    project = load_project(
+        compose_file,
+        project_name=ns.project_name,
+        env_file=ns.env_file,
+        strict_unsupported=not ns.ignore_unsupported,
+    )
     for warning in project.warnings:
         _err(f"warning: {warning}")
     return project
@@ -421,6 +431,20 @@ def cmd_build(ns: argparse.Namespace) -> int:
 
 
 def cmd_config(ns: argparse.Namespace) -> int:
+    if ns.capabilities:
+        report = {
+            "runtime": "wslc",
+            "unsupported": UNSUPPORTED_CAPABILITIES,
+            "limitations": {
+                "networks_per_container": 1,
+                "persistent_health_monitor": False,
+                "restart_policies": False,
+                "build_secrets": False,
+                "external_configs": False,
+            },
+        }
+        print(yaml.safe_dump(report, sort_keys=False, default_flow_style=False))
+        return 0
     project = _load(ns)
     print(yaml.safe_dump(dataclasses.asdict(project), sort_keys=False, default_flow_style=False))
     return 0
@@ -448,6 +472,11 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--env-file", help="alternate .env file")
     parser.add_argument("--dry-run", action="store_true", help="print wslc commands instead of running them")
     parser.add_argument("--profile", action="append", default=[], help="enable a compose profile")
+    parser.add_argument(
+        "--ignore-unsupported",
+        action="store_true",
+        help="warn and continue when wslc cannot honor a Compose option",
+    )
     parser.add_argument("--version", action="version", version=f"wslc-compose {__version__}")
 
     sub = parser.add_subparsers(dest="cmd", required=True)
@@ -504,6 +533,11 @@ def build_parser() -> argparse.ArgumentParser:
     p.set_defaults(func=cmd_build)
 
     p = sub.add_parser("config", help="print the resolved configuration")
+    p.add_argument(
+        "--capabilities",
+        action="store_true",
+        help="print wslc-compose runtime capabilities without loading a project",
+    )
     p.set_defaults(func=cmd_config)
 
     p = sub.add_parser("version", help="show version information")
