@@ -292,6 +292,8 @@ Show the wslc-compose and wslc versions.
 | `stdin_open`, `tty` | `-i`, `-t` |
 | `name` (top level) | default project name |
 | `pull_policy` | image pull/build decision during `up` and `run` |
+| repeated `-f` files | specification-aware model merge and resource uniqueness |
+| `include`, `extends` | modular and inherited Compose service models |
 
 Keys that wslc cannot honor are rejected by default so security or runtime semantics
 are never silently weakened. `--ignore-unsupported` restores warning-only compatibility:
