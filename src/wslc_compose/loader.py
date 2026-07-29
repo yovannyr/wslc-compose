@@ -2,10 +2,11 @@
 
 from __future__ import annotations
 
+import copy
 import os
 import re
 import shlex
-from typing import Dict, List, Optional, Tuple
+from typing import Any, Dict, List, Optional, Sequence, Tuple
 
 import yaml
 
@@ -58,6 +59,70 @@ _WIN_PATH_RE = re.compile(r"^[A-Za-z]:[\\/]")
 
 class ComposeError(ValueError):
     pass
+
+
+def _unique_resource_key(kind: str, item: Any) -> Optional[Tuple[Any, ...]]:
+    """Return the Compose uniqueness key for mergeable service resources."""
+    if kind == "volumes":
+        if isinstance(item, dict):
+            return (item.get("target"),)
+        parts = _split_volume_spec(str(item))
+        return (parts[0] if len(parts) == 1 else parts[1],)
+    if kind in ("secrets", "configs"):
+        if isinstance(item, dict):
+            return (item.get("target") or item.get("source"),)
+        return (str(item),)
+    if kind == "ports":
+        if isinstance(item, dict):
+            return (
+                item.get("host_ip"),
+                item.get("target"),
+                str(item.get("published")) if item.get("published") is not None else None,
+                item.get("protocol", "tcp"),
+            )
+        return tuple(port.to_flag() for port in parse_port(item))
+    return None
+
+
+def merge_compose_models(base: Any, override: Any, path: Tuple[str, ...] = ()) -> Any:
+    """Merge two interpolated Compose models using specification-aware rules."""
+    if path and path[-1] in ("command", "entrypoint"):
+        return copy.deepcopy(override)
+    if len(path) >= 2 and path[-2:] == ("healthcheck", "test"):
+        return copy.deepcopy(override)
+
+    if isinstance(base, dict) and isinstance(override, dict):
+        result = copy.deepcopy(base)
+        for key, value in override.items():
+            key = str(key)
+            if key in result:
+                result[key] = merge_compose_models(result[key], value, path + (key,))
+            else:
+                result[key] = copy.deepcopy(value)
+        return result
+
+    if isinstance(base, list) and isinstance(override, list):
+        kind = path[-1] if path else ""
+        if kind not in ("ports", "volumes", "secrets", "configs"):
+            return copy.deepcopy(base) + copy.deepcopy(override)
+
+        result = copy.deepcopy(base)
+        indexes = {
+            _unique_resource_key(kind, item): index for index, item in enumerate(result)
+        }
+        for item in override:
+            unique_key = _unique_resource_key(kind, item)
+            if unique_key in indexes:
+                index = indexes[unique_key]
+                result[index] = merge_compose_models(
+                    result[index], item, path + (str(index),)
+                )
+            else:
+                indexes[unique_key] = len(result)
+                result.append(copy.deepcopy(item))
+        return result
+
+    return copy.deepcopy(override)
 
 
 def find_compose_file(directory: str) -> Optional[str]:
@@ -403,23 +468,32 @@ def _parse_build(value, project_dir: str, service_name: str) -> BuildConfig:
 
 
 def load_project(
-    compose_file: str,
+    compose_file: Sequence[str],
     project_name: Optional[str] = None,
     env_file: Optional[str] = None,
     strict_unsupported: bool = False,
 ) -> Project:
-    compose_file = os.path.abspath(compose_file)
-    project_dir = os.path.dirname(compose_file)
+    compose_files = [compose_file] if isinstance(compose_file, str) else list(compose_file)
+    if not compose_files:
+        raise ComposeError("at least one compose file is required")
+    compose_files = [os.path.abspath(path) for path in compose_files]
+    project_dir = os.path.dirname(compose_files[0])
 
     dotenv_path = env_file or os.path.join(project_dir, ".env")
     env = dict(load_dotenv(dotenv_path))
     env.update(os.environ)  # process env wins
 
-    with open(compose_file, encoding="utf-8") as fh:
-        raw = yaml.safe_load(fh)
+    raw: Dict[str, Any] = {}
+    for path in compose_files:
+        with open(path, encoding="utf-8") as fh:
+            document = yaml.safe_load(fh)
+        if document is None:
+            document = {}
+        if not isinstance(document, dict):
+            raise ComposeError(f"{path}: expected a mapping at the document root")
+        raw = merge_compose_models(raw, interpolate_tree(document, env))
     if not isinstance(raw, dict) or "services" not in raw:
-        raise ComposeError(f"{compose_file}: no 'services' section found")
-    raw = interpolate_tree(raw, env)
+        raise ComposeError(f"{compose_files[0]}: no 'services' section found")
 
     name = normalize_project_name(
         project_name

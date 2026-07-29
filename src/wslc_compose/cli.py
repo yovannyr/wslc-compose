@@ -44,16 +44,17 @@ def _info(message: str) -> None:
 # --- project loading -------------------------------------------------------
 
 
-def _locate_compose_file(explicit: Optional[str]) -> str:
+def _locate_compose_files(explicit: Optional[List[str]]) -> List[str]:
     if explicit:
-        if not os.path.isfile(explicit):
-            raise ComposeError(f"compose file not found: {explicit}")
+        for path in explicit:
+            if not os.path.isfile(path):
+                raise ComposeError(f"compose file not found: {path}")
         return explicit
     directory = os.getcwd()
     while True:
         found = find_compose_file(directory)
         if found:
-            return found
+            return [found]
         parent = os.path.dirname(directory)
         if parent == directory:
             raise ComposeError(
@@ -64,9 +65,9 @@ def _locate_compose_file(explicit: Optional[str]) -> str:
 
 
 def _load(ns: argparse.Namespace) -> Project:
-    compose_file = _locate_compose_file(ns.file)
+    compose_files = _locate_compose_files(ns.file)
     project = load_project(
-        compose_file,
+        compose_files,
         project_name=ns.project_name,
         env_file=ns.env_file,
         strict_unsupported=not ns.ignore_unsupported,
@@ -467,7 +468,12 @@ def build_parser() -> argparse.ArgumentParser:
         prog="wslc-compose",
         description="docker-compose style orchestration for WSL containers (wslc)",
     )
-    parser.add_argument("-f", "--file", help="compose file (default: auto-detect)")
+    parser.add_argument(
+        "-f",
+        "--file",
+        action="append",
+        help="compose file; repeat to merge overrides (default: auto-detect)",
+    )
     parser.add_argument("-p", "--project-name", help="project name (default: directory name)")
     parser.add_argument("--env-file", help="alternate .env file")
     parser.add_argument("--dry-run", action="store_true", help="print wslc commands instead of running them")
