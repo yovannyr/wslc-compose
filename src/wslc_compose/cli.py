@@ -31,6 +31,7 @@ from wslc_compose.loader import (
     ComposeError,
     find_compose_file,
     load_project,
+    parse_duration,
 )
 from wslc_compose.model import Project, Service
 
@@ -612,6 +613,14 @@ def cmd_ps(ns: argparse.Namespace) -> int:
     return 0
 
 
+def _normalize_log_time(value: str) -> str:
+    try:
+        seconds_ago = parse_duration(value, "log time")
+    except ComposeError:
+        return value
+    return str(max(0, int(time.time() - seconds_ago)))
+
+
 def _follow_logs(
     project: Project,
     service_names: List[str],
@@ -651,9 +660,9 @@ def _follow_logs(
         if timestamps:
             args.append("-t")
         if since is not None:
-            args += ["--since", since]
+            args += ["--since", _normalize_log_time(since)]
         if until is not None:
-            args += ["--until", until]
+            args += ["--until", _normalize_log_time(until)]
         args.append(entry["name"])
         proc = engine.popen(
             args, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True

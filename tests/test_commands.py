@@ -121,6 +121,7 @@ class _LogProcess:
 
 
 def test_logs_forward_since_and_until_to_wslc(monkeypatch):
+    monkeypatch.setattr(cli.time, "time", lambda: 1000)
     project = _project()
     calls = []
     monkeypatch.setattr(
@@ -145,8 +146,8 @@ def test_logs_forward_since_and_until_to_wslc(monkeypatch):
     ) == 0
     assert calls == [
         [
-            "logs", "-f", "-n", "20", "-t", "--since", "10m",
-            "--until", "1m", "demo-app-1"
+            "logs", "-f", "-n", "20", "-t", "--since", "400",
+            "--until", "940", "demo-app-1"
         ]
     ]
 
