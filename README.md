@@ -155,11 +155,12 @@ Apply to every subcommand and go **before** it: `wslc-compose -f other.yml up -d
 
 | Option | Description |
 |---|---|
-| `-f, --file FILE` | compose file to use (default: auto-detect in `.` and parent directories) |
+| `-f, --file FILE` | compose file to use; repeat for specification-aware overrides |
 | `-p, --project-name NAME` | project name (default: `name:` key, else directory name) |
 | `--env-file FILE` | alternate `.env` file for interpolation |
 | `--profile NAME` | enable a compose profile (repeatable) |
 | `--dry-run` | print every `wslc` command instead of executing it |
+| `--ignore-unsupported` | warn instead of failing when wslc cannot honor an option |
 | `--version` | show the wslc-compose version |
 
 ### `up [SERVICE...]`
@@ -171,6 +172,10 @@ Create networks and volumes, build missing images, then create/start containers 
 |---|---|
 | `-d, --detach` | do not attach to logs after starting |
 | `--build` | rebuild images of services that have a `build:` section |
+| `--no-build` | never build missing service images |
+| `--pull POLICY` | override image pull policy: `always`, `missing`, or `never` |
+| `--wait` | wait for running/healthy services before returning |
+| `--wait-timeout SEC` | global readiness timeout (default 60) |
 | `--force-recreate` | recreate containers even if their configuration is unchanged |
 | `--scale SERVICE=N` | override the number of replicas (repeatable) |
 | `-t, --timeout SEC` | stop timeout when recreating (default 10) |
@@ -202,6 +207,8 @@ Show container logs, multiplexed and prefixed per container
 | `-f, --follow` | follow log output |
 | `-n, --tail N` | show only the last N lines |
 | `-t, --timestamps` | show timestamps |
+| `--since VALUE` | show logs newer than a timestamp or relative duration |
+| `--until VALUE` | show logs older than a timestamp or relative duration |
 
 ### `exec SERVICE CMD [ARG...]`
 
@@ -216,6 +223,21 @@ Run a command in a running container of SERVICE.
 | `-T, --no-tty` | disable TTY allocation (for scripts/pipes) |
 
 A TTY is allocated automatically when stdin is a terminal.
+
+### `run [OPTIONS] SERVICE [COMMAND...]`
+
+Run a one-off service command. Dependencies start automatically unless `--no-deps`
+is used. Supports `--rm`, `--name`, `--entrypoint`, `-e`, `--service-ports`,
+`--pull`, `--build`, and `--no-build`.
+
+### Utility commands
+
+- `wait [SERVICE...]` waits for containers and returns their highest exit code.
+- `kill [-s SIGNAL] [SERVICE...]` force-stops containers in reverse dependency order.
+- `rm [--stop] [SERVICE...]` removes service containers.
+- `images [SERVICE...]` reports required images and local availability.
+- `push [SERVICE...]` pushes explicitly named service images.
+- `port SERVICE PRIVATE_PORT` prints the published host binding.
 
 ### `start / stop / restart [SERVICE...]`
 
@@ -252,30 +274,34 @@ Show the wslc-compose and wslc versions.
 | `ports` (short & long syntax, `ip:host:container`, `/udp`, ranges `8000-8005`) | `-p` |
 | `volumes` — named volumes | `wslc volume create` + `-v name:/path` |
 | `secrets` (file source; short & long service syntax) | read-only file mount at `/run/secrets/<name>` or `target` |
+| `configs` (`file`, `content`, `environment`) | materialized read-only file mount |
+| anonymous volumes | generated project/service/replica-scoped wslc volumes |
 | `volumes` — bind mounts (`./rel`, `/abs`, `~`, `E:\win\path`), `:ro` | `-v` with [path translation](#volumes-and-path-translation) |
 | `tmpfs` (top-level list or `type: tmpfs`) | `--tmpfs` |
 | `networks` incl. `aliases`, `external: true`, custom `name:` | `wslc network create`, `--network`, `--network-alias` |
-| `depends_on` (list & map) | topological start/creation order |
+| `depends_on` conditions | start order plus `service_healthy` / `service_completed_successfully` waits |
+| `healthcheck` | startup/readiness checks executed with `wslc exec` |
 | `deploy.replicas` | number of containers (see also `--scale`) |
 | `deploy.resources.limits.cpus` / `.memory`, `cpus`, `mem_limit` | `--cpus`, `-m` |
 | `deploy.resources.reservations.devices` (gpu), `gpus` | `--gpus` |
-| `shm_size`, `ulimits`, `stop_signal` | `--shm-size`, `--ulimit`, `--stop-signal` |
+| `shm_size`, `ulimits`, `stop_signal`, `stop_grace_period` | wslc runtime and stop flags |
 | `hostname`, `domainname`, `dns`, `dns_search`, `dns_opt` | `-h`, `--domainname`, `--dns*` |
 | `user`, `working_dir` | `-u`, `-w` |
 | `labels` (list & map) | `-l` (merged with the tracking labels below) |
 | `profiles` | service skipped unless its profile is enabled or it is named explicitly |
 | `stdin_open`, `tty` | `-i`, `-t` |
 | `name` (top level) | default project name |
+| `pull_policy` | image pull/build decision during `up` and `run` |
 
-Keys that wslc cannot honor yet are **accepted and reported as a warning** instead of
-failing, so your existing files keep working: `restart`, `healthcheck`, `privileged`,
-`cap_add`/`cap_drop`, `devices`, `extra_hosts`, `sysctls`, `configs`, `init`,
+Keys that wslc cannot honor are rejected by default so security or runtime semantics
+are never silently weakened. `--ignore-unsupported` restores warning-only compatibility:
+`restart`, `privileged`, `cap_add`/`cap_drop`, `devices`, `extra_hosts`, `sysctls`, `init`,
 `pid`, `ipc`, `read_only`, `security_opt`, `logging`.
 
-Rejected with an explicit error (no silent surprise): anonymous volumes
-(`- /data` without a source), references to undeclared networks/volumes, circular
-`depends_on`, scaling a service that sets `container_name`, unsupported secret
-sources, and build-time secrets.
+Always rejected: references to undeclared networks/volumes, circular `depends_on`,
+scaling a service that sets `container_name`, external configs, unsupported secret
+sources, and build-time secrets. `config --capabilities` prints the current runtime
+capability report without requiring a Compose file.
 
 ## Variable interpolation
 
@@ -417,10 +443,11 @@ Current boundaries:
 
 `wslc` is a public preview; `wslc-compose` warns at load time rather than failing:
 
-- **`restart:` policies** — no wslc equivalent yet; ignored (a `restart` after reboot
-  is manual: `wslc compose up -d`).
-- **`healthcheck`** / `depends_on: condition: service_healthy` — not supported;
-  conditions fall back to *service_started*.
+- **`restart:` policies** — no wslc equivalent yet; restart after a reboot is manual:
+  `wslc compose up -d`.
+- **Healthchecks are orchestrator-scoped**: `up --wait` and dependency conditions
+  execute checks while wslc-compose is running. There is no persistent daemon health
+  state or automatic unhealthy-container restart after the command exits.
 - **One network per container** (see [Networking](#networking)).
 - **Session mount limit**: the current preview caps mounted volumes at ~15 per WSL
   session — error `Too many volumes have been mounted (limit: 15)` / `0x8007000e`.
@@ -442,8 +469,8 @@ Current boundaries:
 - **Published ports bind the Windows loopback**, not the distro's: test them from
   the Windows side (browser, `powershell.exe Invoke-WebRequest`), not with a `curl
   localhost` inside WSL.
-- `privileged`, `cap_add`, `devices`, `sysctls`, `configs`, `extra_hosts`,
-  `logging` — not configurable with wslc; ignored with a warning.
+- `privileged`, `cap_add`, `devices`, `sysctls`, `extra_hosts`, and logging drivers
+  are rejected unless `--ignore-unsupported` is explicitly used.
 
 When wslc gains native Compose support ([#40948](https://github.com/microsoft/WSL/issues/40948))
 or a Docker Engine API endpoint ([#40976](https://github.com/microsoft/WSL/issues/40976)),
