@@ -25,6 +25,71 @@ class VolumeMount:
     source: Optional[str]  # host path or volume name (None for tmpfs)
     target: str
     read_only: bool = False
+    anonymous: bool = False
+
+
+@dataclass
+class Healthcheck:
+    test: List[str]
+    interval: float = 30.0
+    timeout: float = 30.0
+    retries: int = 3
+    start_period: float = 0.0
+
+
+@dataclass
+class Dependency:
+    condition: str = "service_started"
+    required: bool = True
+
+
+@dataclass
+class LifecycleHook:
+    command: List[str]
+    user: Optional[str] = None
+    working_dir: Optional[str] = None
+    environment: Dict[str, Optional[str]] = field(default_factory=dict)
+
+
+@dataclass
+class WatchRule:
+    action: str
+    path: str
+    ignore: List[str] = field(default_factory=list)
+
+
+@dataclass
+class Secret:
+    """A top-level, file-backed Compose secret."""
+
+    key: str
+    file: str
+
+
+@dataclass
+class SecretMount:
+    """A file-backed secret granted to one service."""
+
+    source: str  # top-level secret key
+    file: str  # resolved host path; never the secret contents
+    target: str  # absolute path inside the container
+
+
+@dataclass
+class Config:
+    """A materialized top-level Compose config."""
+
+    key: str
+    file: str
+
+
+@dataclass
+class ConfigMount:
+    """A read-only config granted to one service."""
+
+    source: str
+    file: str
+    target: str
 
 
 @dataclass
@@ -54,10 +119,14 @@ class Service:
     env_files: List[str] = field(default_factory=list)
     ports: List[PortMapping] = field(default_factory=list)
     volumes: List[VolumeMount] = field(default_factory=list)
+    secrets: List[SecretMount] = field(default_factory=list)
+    configs: List[ConfigMount] = field(default_factory=list)
     tmpfs: List[str] = field(default_factory=list)
     networks: List[str] = field(default_factory=list)  # project-resolved network names
     network_aliases: Dict[str, List[str]] = field(default_factory=dict)
     depends_on: List[str] = field(default_factory=list)
+    dependencies: Dict[str, Dependency] = field(default_factory=dict)
+    healthcheck: Optional[Healthcheck] = None
     hostname: Optional[str] = None
     domainname: Optional[str] = None
     dns: List[str] = field(default_factory=list)
@@ -71,12 +140,17 @@ class Service:
     shm_size: Optional[str] = None
     ulimits: List[str] = field(default_factory=list)
     stop_signal: Optional[str] = None
+    stop_grace_period: Optional[float] = None
     gpus: Optional[str] = None
     stdin_open: bool = False
     tty: bool = False
     replicas: int = 1
     profiles: List[str] = field(default_factory=list)
     restart: Optional[str] = None  # accepted but not enforceable by wslc yet
+    pull_policy: Optional[str] = None
+    post_start: List[LifecycleHook] = field(default_factory=list)
+    pre_stop: List[LifecycleHook] = field(default_factory=list)
+    watch: List[WatchRule] = field(default_factory=list)
 
     def config_hash(self) -> str:
         blob = json.dumps(self, default=lambda o: o.__dict__, sort_keys=True)
@@ -87,6 +161,9 @@ class Service:
 class Network:
     key: str  # name used in the compose file
     name: str  # actual wslc network name
+    driver: Optional[str] = None
+    driver_opts: Dict[str, str] = field(default_factory=dict)
+    labels: Dict[str, str] = field(default_factory=dict)
     external: bool = False
 
 
@@ -94,6 +171,9 @@ class Network:
 class Volume:
     key: str
     name: str
+    driver: Optional[str] = None
+    driver_opts: Dict[str, str] = field(default_factory=dict)
+    labels: Dict[str, str] = field(default_factory=dict)
     external: bool = False
 
 
@@ -104,6 +184,8 @@ class Project:
     services: Dict[str, Service] = field(default_factory=dict)
     networks: Dict[str, Network] = field(default_factory=dict)
     volumes: Dict[str, Volume] = field(default_factory=dict)
+    secrets: Dict[str, Secret] = field(default_factory=dict)
+    configs: Dict[str, Config] = field(default_factory=dict)
     warnings: List[str] = field(default_factory=list)
 
     def container_name(self, service: Service, index: int = 1) -> str:

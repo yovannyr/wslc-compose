@@ -94,12 +94,24 @@ def run(
     capture: bool = False,
     check: bool = True,
     dry_run: bool = False,
+    timeout: Optional[float] = None,
 ) -> subprocess.CompletedProcess:
     argv = [find_wslc()] + args
     if dry_run:
         print("+ " + " ".join(argv))
         return subprocess.CompletedProcess(argv, 0, "", "")
-    proc = subprocess.run(argv, capture_output=capture, text=capture, check=False)
+    try:
+        proc = subprocess.run(
+            argv,
+            capture_output=capture,
+            text=capture,
+            check=False,
+            timeout=timeout,
+        )
+    except subprocess.TimeoutExpired as exc:
+        if check:
+            raise WslcError(f"wslc {' '.join(args[:2])} timed out after {timeout:g}s") from exc
+        return subprocess.CompletedProcess(argv, 124, exc.stdout or "", exc.stderr or "")
     if check and proc.returncode != 0:
         detail = (proc.stderr or "").strip() if capture else ""
         raise WslcError(
@@ -220,15 +232,45 @@ def volume_names() -> List[str]:
     return _names_from_table(["volume", "list"], column="VOLUME NAME")
 
 
-def ensure_network(name: str, dry_run: bool = False) -> bool:
+def _resource_create_args(
+    kind: str,
+    name: str,
+    driver: Optional[str],
+    driver_opts: Optional[Dict[str, str]],
+    labels: Optional[Dict[str, str]],
+) -> List[str]:
+    args = [kind, "create"]
+    if driver:
+        args += ["--driver", driver]
+    for key, value in sorted((driver_opts or {}).items()):
+        args += ["--opt", f"{key}={value}"]
+    for key, value in sorted((labels or {}).items()):
+        args += ["--label", f"{key}={value}"]
+    args.append(name)
+    return args
+
+
+def ensure_network(
+    name: str,
+    dry_run: bool = False,
+    driver: Optional[str] = None,
+    driver_opts: Optional[Dict[str, str]] = None,
+    labels: Optional[Dict[str, str]] = None,
+) -> bool:
     if name in network_names():
         return False
-    run(["network", "create", name], dry_run=dry_run)
+    run(_resource_create_args("network", name, driver, driver_opts, labels), dry_run=dry_run)
     return True
 
 
-def ensure_volume(name: str, dry_run: bool = False) -> bool:
+def ensure_volume(
+    name: str,
+    dry_run: bool = False,
+    driver: Optional[str] = None,
+    driver_opts: Optional[Dict[str, str]] = None,
+    labels: Optional[Dict[str, str]] = None,
+) -> bool:
     if name in volume_names():
         return False
-    run(["volume", "create", name], dry_run=dry_run)
+    run(_resource_create_args("volume", name, driver, driver_opts, labels), dry_run=dry_run)
     return True

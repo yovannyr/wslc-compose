@@ -21,6 +21,10 @@ services:
     mem_limit: 256M
     cpus: 0.5
     user: "101"
+    secrets:
+      - app_secret
+      - source: nuget_config
+        target: /root/.nuget/NuGet.Config
     working_dir: /srv
   job:
     build:
@@ -32,11 +36,18 @@ networks:
   front:
 volumes:
   data:
+secrets:
+  app_secret:
+    file: ./app.secret
+  nuget_config:
+    file: ./NuGet.Config
 """
 
 
 def make_project(tmp_path):
     (tmp_path / "compose.yaml").write_text(COMPOSE)
+    (tmp_path / "app.secret").write_text("never-print-this")
+    (tmp_path / "NuGet.Config").write_text("<configuration />")
     (tmp_path / "html").mkdir()
     (tmp_path / "src").mkdir()
     return load_project(str(tmp_path / "compose.yaml"))
@@ -57,6 +68,11 @@ def test_run_args(tmp_path):
     assert bind in args
     assert "demo_data:/data" in args
 
+    assert f"WIN({tmp_path / 'app.secret'}):/run/secrets/app_secret:ro" in args
+    assert f"WIN({tmp_path / 'NuGet.Config'}):/root/.nuget/NuGet.Config:ro" in args
+    assert "never-print-this" not in " ".join(args)
+    assert all("app.secret" not in arg for arg in args if arg.startswith("-l"))
+
     assert args[args.index("--network") + 1] == "demo_front"
     aliases = [args[i + 1] for i, a in enumerate(args) if a == "--network-alias"]
     assert sorted(aliases) == ["web", "www"]
@@ -70,6 +86,15 @@ def test_run_args(tmp_path):
     assert args[args.index("--cpus") + 1] == "0.5"
     assert args[args.index("-u") + 1] == "101"
     assert args[args.index("-w") + 1] == "/srv"
+
+
+def test_create_args_use_native_create_without_run_only_flags(tmp_path):
+    project = make_project(tmp_path)
+    args = run_args(project, project.services["web"], create_only=True, remove=True)
+
+    assert args[0] == "create"
+    assert "-d" not in args
+    assert "--rm" not in args
 
 
 def test_build_args(tmp_path):

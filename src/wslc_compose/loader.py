@@ -2,22 +2,33 @@
 
 from __future__ import annotations
 
+import copy
+import hashlib
 import os
 import re
 import shlex
-from typing import Dict, List, Optional, Tuple
+import tempfile
+from typing import Any, Dict, List, Optional, Sequence, Tuple
 
 import yaml
 
 from wslc_compose.interpolation import interpolate_tree
 from wslc_compose.model import (
     BuildConfig,
+    Config,
+    ConfigMount,
+    Dependency,
+    Healthcheck,
+    LifecycleHook,
     Network,
     PortMapping,
     Project,
+    Secret,
+    SecretMount,
     Service,
     Volume,
     VolumeMount,
+    WatchRule,
 )
 
 COMPOSE_FILENAMES = (
@@ -27,17 +38,15 @@ COMPOSE_FILENAMES = (
     "docker-compose.yaml",
 )
 
-# compose keys we accept but wslc cannot enforce (yet)
+# Compose keys the current wslc runtime cannot enforce. Ignoring these keys changes
+# container semantics, so the CLI rejects them unless compatibility mode is requested.
 UNSUPPORTED_KEYS = {
-    "healthcheck": "healthchecks are not supported by wslc; depends_on conditions fall back to 'started'",
     "cap_add": "capabilities are not configurable with wslc",
     "cap_drop": "capabilities are not configurable with wslc",
     "privileged": "privileged mode is not supported by wslc",
     "devices": "device mapping is not supported by wslc (see 'gpus' for GPUs)",
     "extra_hosts": "extra_hosts is not supported by wslc",
     "sysctls": "sysctls are not supported by wslc",
-    "secrets": "secrets are not supported; use environment/env_file instead",
-    "configs": "configs are not supported; use bind mounts instead",
     "init": "init is not supported by wslc",
     "pid": "pid mode is not supported by wslc",
     "ipc": "ipc mode is not supported by wslc",
@@ -47,11 +56,296 @@ UNSUPPORTED_KEYS = {
     "healthcheck_disable": "",
 }
 
+UNSUPPORTED_CAPABILITIES = {
+    key: message for key, message in UNSUPPORTED_KEYS.items() if message
+}
+
 _WIN_PATH_RE = re.compile(r"^[A-Za-z]:[\\/]")
 
 
 class ComposeError(ValueError):
     pass
+
+
+class _TaggedValue:
+    def __init__(self, value: Any):
+        self.value = value
+
+
+class _ResetValue(_TaggedValue):
+    pass
+
+
+class _OverrideValue(_TaggedValue):
+    pass
+
+
+class _ComposeLoader(yaml.SafeLoader):
+    pass
+
+
+def _construct_tagged(loader, node, wrapper):
+    if isinstance(node, yaml.ScalarNode):
+        value = loader.construct_scalar(node)
+        if node.tag.endswith(":null") or value in ("null", "~"):
+            value = None
+    elif isinstance(node, yaml.SequenceNode):
+        value = loader.construct_sequence(node, deep=True)
+    else:
+        value = loader.construct_mapping(node, deep=True)
+    return wrapper(value)
+
+
+_ComposeLoader.add_constructor(
+    "!reset", lambda loader, node: _construct_tagged(loader, node, _ResetValue)
+)
+_ComposeLoader.add_constructor(
+    "!override", lambda loader, node: _construct_tagged(loader, node, _OverrideValue)
+)
+
+def _interpolate_compose_tree(node: Any, env: Dict[str, str]) -> Any:
+    if isinstance(node, _TaggedValue):
+        return type(node)(_interpolate_compose_tree(node.value, env))
+    if isinstance(node, list):
+        return [_interpolate_compose_tree(value, env) for value in node]
+    if isinstance(node, dict):
+        return {
+            key: _interpolate_compose_tree(value, env) for key, value in node.items()
+        }
+    return interpolate_tree(node, env)
+
+
+
+def _unique_resource_key(kind: str, item: Any) -> Optional[Tuple[Any, ...]]:
+    """Return the Compose uniqueness key for mergeable service resources."""
+    if kind == "volumes":
+        if isinstance(item, dict):
+            return (item.get("target"),)
+        parts = _split_volume_spec(str(item))
+        return (parts[0] if len(parts) == 1 else parts[1],)
+    if kind in ("secrets", "configs"):
+        if isinstance(item, dict):
+            return (item.get("target") or item.get("source"),)
+        return (str(item),)
+    if kind == "ports":
+        if isinstance(item, dict):
+            return (
+                item.get("host_ip"),
+                item.get("target"),
+                str(item.get("published")) if item.get("published") is not None else None,
+                item.get("protocol", "tcp"),
+            )
+        return tuple(port.to_flag() for port in parse_port(item))
+    return None
+
+
+def merge_compose_models(base: Any, override: Any, path: Tuple[str, ...] = ()) -> Any:
+    """Merge two interpolated Compose models using specification-aware rules."""
+    if isinstance(override, _OverrideValue):
+        return copy.deepcopy(override.value)
+    if isinstance(override, _ResetValue):
+        if override.value is not None:
+            return copy.deepcopy(override.value)
+        if isinstance(base, list):
+            return []
+        if isinstance(base, dict):
+            return {}
+        return None
+
+    if path and path[-1] in ("command", "entrypoint"):
+        return copy.deepcopy(override)
+    if len(path) >= 2 and path[-2:] == ("healthcheck", "test"):
+        return copy.deepcopy(override)
+
+    if isinstance(base, dict) and isinstance(override, dict):
+        result = copy.deepcopy(base)
+        for key, value in override.items():
+            key = str(key)
+            if key in result:
+                result[key] = merge_compose_models(result[key], value, path + (key,))
+            else:
+                result[key] = merge_compose_models(None, value, path + (key,))
+        return result
+
+    if isinstance(base, list) and isinstance(override, list):
+        kind = path[-1] if path else ""
+        if kind not in ("ports", "volumes", "secrets", "configs"):
+            return copy.deepcopy(base) + copy.deepcopy(override)
+
+        result = copy.deepcopy(base)
+        indexes = {
+            _unique_resource_key(kind, item): index for index, item in enumerate(result)
+        }
+        for item in override:
+            unique_key = _unique_resource_key(kind, item)
+            if unique_key in indexes:
+                index = indexes[unique_key]
+                result[index] = merge_compose_models(
+                    result[index], item, path + (str(index),)
+                )
+            else:
+                indexes[unique_key] = len(result)
+                result.append(copy.deepcopy(item))
+        return result
+
+    return copy.deepcopy(override)
+
+
+def _absolutize_document_paths(document: Dict[str, Any], project_dir: str) -> None:
+    for config in (document.get("secrets") or {}).values():
+        if isinstance(config, dict) and config.get("file"):
+            config["file"] = _resolve_bind_source(str(config["file"]), project_dir)
+    for config in (document.get("configs") or {}).values():
+        if isinstance(config, dict) and config.get("file"):
+            config["file"] = _resolve_bind_source(str(config["file"]), project_dir)
+
+    for service in (document.get("services") or {}).values():
+        if not isinstance(service, dict):
+            continue
+        build = service.get("build")
+        if isinstance(build, str):
+            service["build"] = _resolve_bind_source(build, project_dir)
+        elif isinstance(build, dict):
+            build["context"] = _resolve_bind_source(
+                str(build.get("context", ".")), project_dir
+            )
+        env_file = service.get("env_file")
+        if isinstance(env_file, str):
+            service["env_file"] = _resolve_bind_source(env_file, project_dir)
+        elif isinstance(env_file, dict):
+            env_file["path"] = _resolve_bind_source(str(env_file["path"]), project_dir)
+        elif isinstance(env_file, list):
+            resolved_env_files = []
+            for item in env_file:
+                if isinstance(item, dict):
+                    item["path"] = _resolve_bind_source(str(item["path"]), project_dir)
+                    resolved_env_files.append(item)
+                else:
+                    resolved_env_files.append(_resolve_bind_source(str(item), project_dir))
+            service["env_file"] = resolved_env_files
+        volumes = []
+        for volume in service.get("volumes") or []:
+            if isinstance(volume, dict):
+                if volume.get("type") == "bind" and volume.get("source"):
+                    volume["source"] = _resolve_bind_source(
+                        str(volume["source"]), project_dir
+                    )
+                volumes.append(volume)
+                continue
+            parts = list(_split_volume_spec(str(volume)))
+            if len(parts) >= 2 and _is_host_path(parts[0]):
+                parts[0] = _resolve_bind_source(parts[0], project_dir)
+            volumes.append(":".join(parts))
+        if "volumes" in service:
+            service["volumes"] = volumes
+
+
+def _load_compose_document(
+    path: str,
+    env: Dict[str, str],
+    stack: Optional[List[str]] = None,
+    absolutize_paths: bool = False,
+    project_directory: Optional[str] = None,
+) -> Dict[str, Any]:
+    path = os.path.abspath(path)
+    stack = list(stack or [])
+    if path in stack:
+        raise ComposeError("circular include: " + " -> ".join(stack + [path]))
+    stack.append(path)
+    with open(path, encoding="utf-8") as fh:
+        document = yaml.load(fh, Loader=_ComposeLoader)
+    if document is None:
+        document = {}
+    if not isinstance(document, dict):
+        raise ComposeError(f"{path}: expected a mapping at the document root")
+    document = _interpolate_compose_tree(document, env)
+
+    includes = document.pop("include", [])
+    if isinstance(includes, (str, dict)):
+        includes = [includes]
+    if not isinstance(includes, list):
+        raise ComposeError(f"{path}: include must be a path, mapping, or list")
+
+    merged: Dict[str, Any] = {}
+    for include in includes:
+        include_project_dir = None
+        env_files = []
+        if isinstance(include, str):
+            include_paths = [include]
+        elif isinstance(include, dict) and include.get("path"):
+            raw_paths = include["path"]
+            include_paths = [raw_paths] if isinstance(raw_paths, str) else list(raw_paths)
+            if include.get("project_directory"):
+                include_project_dir = _resolve_bind_source(
+                    str(include["project_directory"]), os.path.dirname(path)
+                )
+            raw_env_files = include.get("env_file") or []
+            env_files = [raw_env_files] if isinstance(raw_env_files, str) else raw_env_files
+        else:
+            raise ComposeError(f"{path}: invalid include entry {include!r}")
+
+        for include_path in include_paths:
+            resolved_path = _resolve_bind_source(str(include_path), os.path.dirname(path))
+            effective_project_dir = include_project_dir or os.path.dirname(resolved_path)
+            include_env = dict(env)
+            for env_file in env_files:
+                include_env.update(
+                    load_dotenv(
+                        _resolve_bind_source(str(env_file), effective_project_dir)
+                    )
+                )
+            include_env.update(os.environ)
+            included = _load_compose_document(
+                resolved_path,
+                include_env,
+                stack,
+                absolutize_paths=True,
+                project_directory=effective_project_dir,
+            )
+            merged = merge_compose_models(merged, included)
+
+    merged = merge_compose_models(merged, document)
+    if absolutize_paths:
+        _absolutize_document_paths(
+            merged, project_directory or os.path.dirname(path)
+        )
+    return merged
+
+
+def _resolve_service_extends(
+    raw: Dict[str, Any], project_dir: str, env: Dict[str, str]
+) -> None:
+    services = raw.get("services") or {}
+    resolved = {}
+
+    def resolve(name: str, stack: List[str], source_services: Dict[str, Any]) -> Dict[str, Any]:
+        if name in stack:
+            raise ComposeError("circular extends: " + " -> ".join(stack + [name]))
+        config = source_services.get(name)
+        if not isinstance(config, dict):
+            raise ComposeError(f"extends references undefined service {name!r}")
+        extends = config.get("extends")
+        if not extends:
+            return copy.deepcopy(config)
+        if isinstance(extends, str):
+            base_name = extends
+            base_services = source_services
+        elif isinstance(extends, dict) and extends.get("service"):
+            base_name = str(extends["service"])
+            base_services = source_services
+            if extends.get("file"):
+                extends_path = _resolve_bind_source(str(extends["file"]), project_dir)
+                base_document = _load_compose_document(extends_path, env)
+                base_services = base_document.get("services") or {}
+        else:
+            raise ComposeError(f"service {name!r}: invalid extends value")
+        base = resolve(base_name, stack + [name], base_services)
+        override = {key: value for key, value in config.items() if key != "extends"}
+        return merge_compose_models(base, override, ("services", name))
+
+    for service_name in services:
+        resolved[str(service_name)] = resolve(str(service_name), [], services)
+    raw["services"] = resolved
 
 
 def find_compose_file(directory: str) -> Optional[str]:
@@ -224,13 +518,17 @@ def parse_volume(spec, project_dir: str) -> VolumeMount:
         read_only = bool(spec.get("read_only", False))
         if vtype == "bind" and source:
             source = _resolve_bind_source(source, project_dir)
-        return VolumeMount(vtype, source, target, read_only)
+        return VolumeMount(
+            vtype,
+            source,
+            target,
+            read_only,
+            anonymous=vtype == "volume" and source is None,
+        )
 
     parts = _split_volume_spec(str(spec))
     if len(parts) == 1:
-        raise ComposeError(
-            f"anonymous volumes are not supported by wslc: {spec!r}; name the volume or use a bind mount"
-        )
+        return VolumeMount("volume", None, parts[0], False, True)
     if len(parts) == 2:
         source, target, opts = parts[0], parts[1], ""
     elif len(parts) == 3:
@@ -252,28 +550,355 @@ def _resolve_bind_source(source: str, project_dir: str) -> str:
     return source
 
 
-def _parse_depends_on(value) -> Tuple[List[str], List[str]]:
-    warnings: List[str] = []
+def _parse_secret_definitions(value, project_dir: str) -> Dict[str, Secret]:
     if value is None:
-        return [], warnings
+        return {}
+    if not isinstance(value, dict):
+        raise ComposeError(f"secrets: expected mapping, got {type(value).__name__}")
+
+    result: Dict[str, Secret] = {}
+    for raw_key, cfg in value.items():
+        key = str(raw_key)
+        if not isinstance(cfg, dict):
+            raise ComposeError(
+                f"secret {key!r}: expected a mapping with a 'file' source"
+            )
+        if cfg.get("external"):
+            raise ComposeError(
+                f"secret {key!r}: external secrets are not supported by wslc; "
+                "use a file-backed secret"
+            )
+        if "environment" in cfg:
+            raise ComposeError(
+                f"secret {key!r}: environment-backed secrets are not supported by "
+                "wslc; write the value to a protected host file and use 'file'"
+            )
+        if not cfg.get("file"):
+            raise ComposeError(
+                f"secret {key!r}: only file-backed secrets are supported by wslc"
+            )
+
+        source = _resolve_bind_source(str(cfg["file"]), project_dir)
+        is_windows_path_from_wsl = os.name != "nt" and (
+            bool(_WIN_PATH_RE.match(source)) or source.startswith("\\\\")
+        )
+        if not is_windows_path_from_wsl and not os.path.isfile(source):
+            raise ComposeError(f"secret {key!r}: file not found: {source}")
+        result[key] = Secret(key=key, file=source)
+    return result
+
+
+def _parse_service_secrets(
+    value,
+    definitions: Dict[str, Secret],
+    service_name: str,
+) -> Tuple[List[SecretMount], List[str]]:
+    if value is None:
+        return [], []
+    if not isinstance(value, list):
+        raise ComposeError(
+            f"{service_name}: secrets: expected list, got {type(value).__name__}"
+        )
+
+    mounts: List[SecretMount] = []
+    warnings: List[str] = []
+    targets = set()
+    for spec in value:
+        if isinstance(spec, str):
+            source = spec
+            target = spec
+            ignored = []
+        elif isinstance(spec, dict):
+            if not spec.get("source"):
+                raise ComposeError(
+                    f"{service_name}: secret entry missing source: {spec!r}"
+                )
+            source = str(spec["source"])
+            target = str(spec.get("target") or source)
+            ignored = [key for key in ("uid", "gid", "mode") if key in spec]
+        else:
+            raise ComposeError(
+                f"{service_name}: invalid secret entry: expected string or mapping"
+            )
+
+        definition = definitions.get(source)
+        if definition is None:
+            raise ComposeError(
+                f"service {service_name!r} references undefined secret {source!r}"
+            )
+
+        if target.startswith("/"):
+            container_target = target
+        else:
+            if target in ("", ".", "..") or "/" in target or "\\" in target:
+                raise ComposeError(
+                    f"{service_name}: secret {source!r} has invalid target {target!r}; "
+                    "use a filename or an absolute container path"
+                )
+            container_target = f"/run/secrets/{target}"
+
+        if container_target in targets:
+            raise ComposeError(
+                f"{service_name}: multiple secrets target {container_target!r}"
+            )
+        targets.add(container_target)
+        mounts.append(
+            SecretMount(
+                source=source,
+                file=definition.file,
+                target=container_target,
+            )
+        )
+        if ignored:
+            warnings.append(
+                f"secret {source!r}: {', '.join(ignored)} cannot be enforced by "
+                "wslc file mounts and will be ignored"
+            )
+    return mounts, warnings
+
+
+def _materialize_config(key: str, content: str) -> str:
+    digest = hashlib.sha256(content.encode()).hexdigest()[:16]
+    safe_key = re.sub(r"[^A-Za-z0-9_.-]", "_", key)
+    directory = os.path.join(tempfile.gettempdir(), "wslc-compose", "configs")
+    os.makedirs(directory, exist_ok=True)
+    path = os.path.join(directory, f"{safe_key}-{digest}")
+    if not os.path.isfile(path):
+        with open(path, "w", encoding="utf-8", newline="") as fh:
+            fh.write(content)
+    return path
+
+
+def _parse_config_definitions(
+    value: Any, project_dir: str, env: Dict[str, str]
+) -> Dict[str, Config]:
+    if value is None:
+        return {}
+    if not isinstance(value, dict):
+        raise ComposeError(f"configs: expected mapping, got {type(value).__name__}")
+
+    result = {}
+    for raw_key, cfg in value.items():
+        key = str(raw_key)
+        if not isinstance(cfg, dict):
+            raise ComposeError(f"config {key!r}: expected a mapping")
+        if cfg.get("external"):
+            raise ComposeError(
+                f"config {key!r}: external configs are not supported because wslc "
+                "has no config object store"
+            )
+        sources = [source for source in ("file", "content", "environment") if source in cfg]
+        if len(sources) != 1:
+            raise ComposeError(
+                f"config {key!r}: exactly one of file, content, or environment is required"
+            )
+        source = sources[0]
+        if source == "file":
+            path = _resolve_bind_source(str(cfg[source]), project_dir)
+            if not os.path.isfile(path):
+                raise ComposeError(f"config {key!r}: file not found: {path}")
+        elif source == "environment":
+            variable = str(cfg[source])
+            if variable not in env:
+                raise ComposeError(
+                    f"config {key!r}: environment variable {variable!r} is not set"
+                )
+            path = _materialize_config(key, env[variable])
+        else:
+            path = _materialize_config(key, str(cfg[source]))
+        result[key] = Config(key=key, file=path)
+    return result
+
+
+def _parse_service_configs(
+    value: Any,
+    definitions: Dict[str, Config],
+    service_name: str,
+) -> Tuple[List[ConfigMount], List[str]]:
+    if value is None:
+        return [], []
+    if not isinstance(value, list):
+        raise ComposeError(
+            f"{service_name}: configs: expected list, got {type(value).__name__}"
+        )
+
+    mounts = []
+    warnings = []
+    targets = set()
+    for spec in value:
+        if isinstance(spec, str):
+            source = spec
+            target = spec
+            ignored = []
+        elif isinstance(spec, dict) and spec.get("source"):
+            source = str(spec["source"])
+            target = str(spec.get("target") or source)
+            ignored = [key for key in ("uid", "gid", "mode") if key in spec]
+        else:
+            raise ComposeError(
+                f"{service_name}: config entry must be a name or mapping with source"
+            )
+        definition = definitions.get(source)
+        if definition is None:
+            raise ComposeError(
+                f"service {service_name!r} references undefined config {source!r}"
+            )
+        if target.startswith("/"):
+            container_target = target
+        else:
+            if target in ("", ".", "..") or "/" in target or "\\" in target:
+                raise ComposeError(
+                    f"{service_name}: config {source!r} has invalid target {target!r}"
+                )
+            container_target = f"/{target}"
+        if container_target in targets:
+            raise ComposeError(
+                f"{service_name}: multiple configs target {container_target!r}"
+            )
+        targets.add(container_target)
+        mounts.append(
+            ConfigMount(source=source, file=definition.file, target=container_target)
+        )
+        if ignored:
+            warnings.append(
+                f"config {source!r}: {', '.join(ignored)} cannot be enforced by "
+                "wslc file mounts and will be ignored"
+            )
+    return mounts, warnings
+
+
+_DURATION_RE = re.compile(r"(\d+(?:\.\d+)?)(ns|us|ms|s|m|h)")
+_DURATION_FACTORS = {
+    "ns": 0.000000001,
+    "us": 0.000001,
+    "ms": 0.001,
+    "s": 1.0,
+    "m": 60.0,
+    "h": 3600.0,
+}
+
+
+def parse_duration(value: Any, what: str) -> float:
+    if isinstance(value, (int, float)):
+        return float(value)
+    text = str(value)
+    total = 0.0
+    position = 0
+    for match in _DURATION_RE.finditer(text):
+        if match.start() != position:
+            raise ComposeError(f"{what}: invalid duration {value!r}")
+        total += float(match.group(1)) * _DURATION_FACTORS[match.group(2)]
+        position = match.end()
+    if position != len(text) or not text:
+        raise ComposeError(f"{what}: invalid duration {value!r}")
+    return total
+
+
+def _parse_healthcheck(value: Any, service_name: str) -> Optional[Healthcheck]:
+    if value is None:
+        return None
+    if not isinstance(value, dict):
+        raise ComposeError(f"{service_name}: healthcheck must be a mapping")
+    if value.get("disable"):
+        return None
+    test = value.get("test")
+    if isinstance(test, str):
+        test = ["CMD-SHELL", test]
+    elif isinstance(test, list):
+        test = [str(part) for part in test]
+    else:
+        raise ComposeError(f"{service_name}: healthcheck.test must be a string or list")
+    if not test or test[0] not in ("CMD", "CMD-SHELL", "NONE"):
+        raise ComposeError(
+            f"{service_name}: healthcheck.test must start with CMD, CMD-SHELL, or NONE"
+        )
+    if test[0] == "NONE":
+        return None
+    retries = int(value.get("retries", 3))
+    if retries < 1:
+        raise ComposeError(f"{service_name}: healthcheck.retries must be at least 1")
+    return Healthcheck(
+        test=test,
+        interval=parse_duration(value.get("interval", "30s"), "healthcheck.interval"),
+        timeout=parse_duration(value.get("timeout", "30s"), "healthcheck.timeout"),
+        retries=retries,
+        start_period=parse_duration(
+            value.get("start_period", "0s"), "healthcheck.start_period"
+        ),
+    )
+
+
+def _parse_depends_on(value) -> Tuple[List[str], Dict[str, Dependency]]:
+    if value is None:
+        return [], {}
     if isinstance(value, list):
-        return [str(v) for v in value], warnings
+        names = [str(v) for v in value]
+        return names, {name: Dependency() for name in names}
     if isinstance(value, dict):
         deps = []
+        conditions = {}
         for name, cfg in value.items():
-            deps.append(str(name))
+            name = str(name)
+            deps.append(name)
             condition = (cfg or {}).get("condition", "service_started")
-            if condition not in ("service_started",):
-                warnings.append(
-                    f"depends_on condition {condition!r} on {name!r} is treated as service_started"
+            if condition not in (
+                "service_started",
+                "service_healthy",
+                "service_completed_successfully",
+            ):
+                raise ComposeError(
+                    f"depends_on condition {condition!r} on {name!r} is invalid"
                 )
-        return deps, warnings
+            conditions[name] = Dependency(
+                condition=condition,
+                required=bool((cfg or {}).get("required", True)),
+            )
+        return deps, conditions
     raise ComposeError("depends_on: expected list or mapping")
 
 
-def _parse_build(value, project_dir: str) -> BuildConfig:
+def _parse_lifecycle_hooks(
+    value: Any, service_name: str, hook_name: str
+) -> List[LifecycleHook]:
+    if value is None:
+        return []
+    if not isinstance(value, list):
+        raise ComposeError(f"{service_name}: {hook_name} must be a list")
+    hooks = []
+    for index, item in enumerate(value):
+        if not isinstance(item, dict) or item.get("command") is None:
+            raise ComposeError(
+                f"{service_name}: {hook_name}[{index}] requires a command"
+            )
+        if item.get("privileged"):
+            raise ComposeError(
+                f"{service_name}: {hook_name}[{index}].privileged is not "
+                "supported by wslc"
+            )
+        command = _as_command(item["command"])
+        if not command:
+            raise ComposeError(
+                f"{service_name}: {hook_name}[{index}] command must not be empty"
+            )
+        hooks.append(
+            LifecycleHook(
+                command=command,
+                user=str(item["user"]) if item.get("user") is not None else None,
+                working_dir=item.get("working_dir"),
+                environment=_as_environment(item.get("environment")),
+            )
+        )
+    return hooks
+
+
+def _parse_build(value, project_dir: str, service_name: str) -> BuildConfig:
     if isinstance(value, str):
         return BuildConfig(context=_resolve_bind_source(value, project_dir))
+    if "secrets" in value:
+        raise ComposeError(
+            f"{service_name}: build.secrets are not supported because "
+            "'wslc build' has no --secret option; do not pass credentials as build args"
+        )
     context = _resolve_bind_source(value.get("context", "."), project_dir)
     return BuildConfig(
         context=context,
@@ -284,24 +909,94 @@ def _parse_build(value, project_dir: str) -> BuildConfig:
     )
 
 
+
+def _parse_env_files(value: Any, project_dir: str, service_name: str) -> List[str]:
+    if value is None:
+        return []
+    items = value if isinstance(value, list) else [value]
+    result = []
+    for index, item in enumerate(items):
+        if isinstance(item, str):
+            path = item
+            required = True
+        elif isinstance(item, dict) and item.get("path"):
+            path = str(item["path"])
+            required = bool(item.get("required", True))
+            env_format = item.get("format", "compose")
+            if env_format not in ("compose", "raw"):
+                raise ComposeError(
+                    f"{service_name}: env_file[{index}].format must be compose or raw"
+                )
+        else:
+            raise ComposeError(
+                f"{service_name}: env_file[{index}] must be a path or mapping"
+            )
+        resolved = os.path.abspath(path if os.path.isabs(path) else os.path.join(project_dir, path))
+        if not os.path.isfile(resolved):
+            if required:
+                raise ComposeError(
+                    f"{service_name}: required env_file not found: {resolved}"
+                )
+            continue
+        result.append(resolved)
+    return result
+
+def _parse_watch_rules(
+    value: Any, project_dir: str, service_name: str
+) -> List[WatchRule]:
+    if value is None:
+        return []
+    if not isinstance(value, list):
+        raise ComposeError(f"{service_name}: develop.watch must be a list")
+    rules = []
+    for index, item in enumerate(value):
+        if not isinstance(item, dict) or not item.get("path") or not item.get("action"):
+            raise ComposeError(
+                f"{service_name}: develop.watch[{index}] requires path and action"
+            )
+        action = str(item["action"])
+        if action in ("sync", "sync+restart"):
+            raise ComposeError(
+                f"{service_name}: develop.watch action {action!r} is not supported "
+                "because wslc has no container file-copy operation"
+            )
+        if action not in ("rebuild", "restart"):
+            raise ComposeError(f"{service_name}: invalid develop.watch action {action!r}")
+        path = str(item["path"])
+        path = os.path.abspath(
+            path if os.path.isabs(path) else os.path.join(project_dir, path)
+        )
+        if not os.path.exists(path):
+            raise ComposeError(f"{service_name}: develop.watch path not found: {path}")
+        rules.append(
+            WatchRule(action=action, path=path, ignore=_as_list(item.get("ignore")))
+        )
+    return rules
+
+
 def load_project(
-    compose_file: str,
+    compose_file: Sequence[str],
     project_name: Optional[str] = None,
     env_file: Optional[str] = None,
+    strict_unsupported: bool = False,
 ) -> Project:
-    compose_file = os.path.abspath(compose_file)
-    project_dir = os.path.dirname(compose_file)
+    compose_files = [compose_file] if isinstance(compose_file, str) else list(compose_file)
+    if not compose_files:
+        raise ComposeError("at least one compose file is required")
+    compose_files = [os.path.abspath(path) for path in compose_files]
+    project_dir = os.path.dirname(compose_files[0])
 
     dotenv_path = env_file or os.path.join(project_dir, ".env")
     env = dict(load_dotenv(dotenv_path))
     env.update(os.environ)  # process env wins
 
-    with open(compose_file, encoding="utf-8") as fh:
-        raw = yaml.safe_load(fh)
+    raw: Dict[str, Any] = {}
+    for path in compose_files:
+        raw = merge_compose_models(raw, _load_compose_document(path, env))
     if not isinstance(raw, dict) or "services" not in raw:
-        raise ComposeError(f"{compose_file}: no 'services' section found")
-    raw = interpolate_tree(raw, env)
+        raise ComposeError(f"{compose_files[0]}: no 'services' section found")
 
+    _resolve_service_extends(raw, project_dir, env)
     name = normalize_project_name(
         project_name
         or env.get("COMPOSE_PROJECT_NAME")
@@ -316,14 +1011,31 @@ def load_project(
         cfg = cfg or {}
         external = bool(cfg.get("external", False))
         net_name = cfg.get("name") or (key if external else f"{name}_{key}")
-        project.networks[key] = Network(key=key, name=net_name, external=external)
+        project.networks[key] = Network(
+            key=key,
+            name=net_name,
+            external=external,
+            driver=cfg.get("driver"),
+            driver_opts=_as_mapping(cfg.get("driver_opts"), "networks.driver_opts"),
+            labels=_as_mapping(cfg.get("labels"), "networks.labels"),
+        )
 
     raw_volumes = raw.get("volumes") or {}
     for key, cfg in raw_volumes.items():
         cfg = cfg or {}
         external = bool(cfg.get("external", False))
         vol_name = cfg.get("name") or (key if external else f"{name}_{key}")
-        project.volumes[key] = Volume(key=key, name=vol_name, external=external)
+        project.volumes[key] = Volume(
+            key=key,
+            name=vol_name,
+            external=external,
+            driver=cfg.get("driver"),
+            driver_opts=_as_mapping(cfg.get("driver_opts"), "volumes.driver_opts"),
+            labels=_as_mapping(cfg.get("labels"), "volumes.labels"),
+        )
+
+    project.secrets = _parse_secret_definitions(raw.get("secrets"), project_dir)
+    project.configs = _parse_config_definitions(raw.get("configs"), project_dir, env)
 
     # --- services ----------------------------------------------------------
     for svc_name, cfg in (raw.get("services") or {}).items():
@@ -331,13 +1043,20 @@ def load_project(
             raise ComposeError(f"service {svc_name!r} is empty")
         svc = Service(name=str(svc_name))
 
-        for key, message in UNSUPPORTED_KEYS.items():
-            if key in cfg and message:
-                project.warnings.append(f"{svc_name}: {message} (ignoring '{key}')")
+        for key, message in UNSUPPORTED_CAPABILITIES.items():
+            if key not in cfg:
+                continue
+            detail = f"{svc_name}: {message} (unsupported option '{key}')"
+            if strict_unsupported:
+                raise ComposeError(
+                    f"{detail}; remove it or use --ignore-unsupported to accept "
+                    "degraded behavior"
+                )
+            project.warnings.append(f"{detail} (ignoring)")
 
         svc.image = cfg.get("image")
         if "build" in cfg:
-            svc.build = _parse_build(cfg["build"], project_dir)
+            svc.build = _parse_build(cfg["build"], project_dir, str(svc_name))
         if not svc.image and not svc.build:
             raise ComposeError(f"service {svc_name!r} needs 'image' or 'build'")
 
@@ -345,14 +1064,35 @@ def load_project(
         svc.entrypoint = _as_command(cfg.get("entrypoint"))
         svc.container_name = cfg.get("container_name")
         svc.environment = _as_environment(cfg.get("environment"))
-        svc.env_files = [
-            f if os.path.isabs(f) else os.path.join(project_dir, f)
-            for f in _as_list(cfg.get("env_file"))
-        ]
+        svc.env_files = _parse_env_files(
+            cfg.get("env_file"), project_dir, str(svc_name)
+        )
         for spec in cfg.get("ports") or []:
             svc.ports.extend(parse_port(spec))
         for spec in cfg.get("volumes") or []:
             svc.volumes.append(parse_volume(spec, project_dir))
+        svc.secrets, secret_warnings = _parse_service_secrets(
+            cfg.get("secrets"), project.secrets, str(svc_name)
+        )
+        svc.configs, config_warnings = _parse_service_configs(
+            cfg.get("configs"), project.configs, str(svc_name)
+        )
+        project.warnings.extend(f"{svc_name}: {w}" for w in secret_warnings)
+        project.warnings.extend(f"{svc_name}: {w}" for w in config_warnings)
+        occupied_targets = {mount.target for mount in svc.volumes}
+        for secret in svc.secrets:
+            if secret.target in occupied_targets:
+                raise ComposeError(
+                    f"{svc_name}: secret target {secret.target!r} conflicts with a volume"
+                )
+            occupied_targets.add(secret.target)
+        for config in svc.configs:
+            if config.target in occupied_targets:
+                raise ComposeError(
+                    f"{svc_name}: config target {config.target!r} conflicts with "
+                    "another mount"
+                )
+            occupied_targets.add(config.target)
         svc.tmpfs = _as_list(cfg.get("tmpfs"))
 
         # networks: list or mapping (with aliases); default network otherwise
@@ -386,14 +1126,28 @@ def load_project(
         # named volumes must be declared
         for mount in svc.volumes:
             if mount.type == "volume":
-                if mount.source not in project.volumes:
+                if mount.anonymous:
+                    target_hash = hashlib.sha256(mount.target.encode()).hexdigest()[:8]
+                    mount.source = (
+                        f"{name}_{svc.name}_anonymous_{target_hash}"
+                    )
+                elif mount.source not in project.volumes:
                     raise ComposeError(
                         f"service {svc_name!r} references undefined volume {mount.source!r}"
                     )
-                mount.source = project.volumes[mount.source].name
+                else:
+                    mount.source = project.volumes[mount.source].name
 
-        svc.depends_on, dep_warnings = _parse_depends_on(cfg.get("depends_on"))
-        project.warnings.extend(f"{svc_name}: {w}" for w in dep_warnings)
+        svc.depends_on, svc.dependencies = _parse_depends_on(cfg.get("depends_on"))
+        svc.healthcheck = _parse_healthcheck(cfg.get("healthcheck"), str(svc_name))
+        svc.post_start = _parse_lifecycle_hooks(
+            cfg.get("post_start"), str(svc_name), "post_start"
+        )
+        svc.pre_stop = _parse_lifecycle_hooks(
+            cfg.get("pre_stop"), str(svc_name), "pre_stop"
+        )
+        develop = cfg.get("develop") or {}
+        svc.watch = _parse_watch_rules(develop.get("watch"), project_dir, str(svc_name))
 
         svc.hostname = cfg.get("hostname")
         svc.domainname = cfg.get("domainname")
@@ -404,15 +1158,34 @@ def load_project(
         svc.working_dir = cfg.get("working_dir")
         svc.labels = _as_mapping(cfg.get("labels"), "labels")
         svc.stop_signal = cfg.get("stop_signal")
+        if cfg.get("stop_grace_period") is not None:
+            svc.stop_grace_period = parse_duration(
+                cfg["stop_grace_period"], f"{svc_name}.stop_grace_period"
+            )
         svc.shm_size = str(cfg["shm_size"]) if cfg.get("shm_size") is not None else None
         svc.stdin_open = bool(cfg.get("stdin_open", False))
         svc.tty = bool(cfg.get("tty", False))
         svc.profiles = _as_list(cfg.get("profiles"))
         svc.restart = cfg.get("restart")
-        if svc.restart and svc.restart not in ("no", '"no"'):
-            project.warnings.append(
-                f"{svc_name}: restart policies are not supported by wslc yet (ignoring 'restart: {svc.restart}')"
+        svc.pull_policy = cfg.get("pull_policy")
+        if svc.pull_policy not in (None, "always", "never", "missing", "if_not_present", "build"):
+            raise ComposeError(
+                f"{svc_name}: invalid pull_policy {svc.pull_policy!r}; expected "
+                "always, never, missing, or build"
             )
+        if svc.pull_policy == "if_not_present":
+            svc.pull_policy = "missing"
+        if svc.restart and svc.restart not in ("no", '"no"'):
+            detail = (
+                f"{svc_name}: restart policies are not supported by wslc "
+                f"(unsupported option 'restart: {svc.restart}')"
+            )
+            if strict_unsupported:
+                raise ComposeError(
+                    f"{detail}; remove it or use --ignore-unsupported to accept "
+                    "degraded behavior"
+                )
+            project.warnings.append(f"{detail} (ignoring)")
 
         raw_ulimits = cfg.get("ulimits")
         if isinstance(raw_ulimits, dict):
@@ -442,4 +1215,20 @@ def load_project(
 
         project.services[svc.name] = svc
 
+    for service in project.services.values():
+        for dependency_name, dependency in service.dependencies.items():
+            dependency_service = project.services.get(dependency_name)
+            if dependency_service is None:
+                raise ComposeError(
+                    f"service {service.name!r} depends on undefined service "
+                    f"{dependency_name!r}"
+                )
+            if (
+                dependency.condition == "service_healthy"
+                and dependency_service.healthcheck is None
+            ):
+                raise ComposeError(
+                    f"service {service.name!r} requires {dependency_name!r} to be healthy, "
+                    "but it has no healthcheck"
+                )
     return project

@@ -15,14 +15,23 @@ def run_args(
     index: int = 1,
     detach: bool = True,
     path_mapper: Optional[Callable[[str], str]] = None,
+    container_name: Optional[str] = None,
+    command_override: Optional[List[str]] = None,
+    entrypoint_override: Optional[List[str]] = None,
+    remove: bool = False,
+    include_ports: bool = True,
+    anonymous_volume_suffix: Optional[str] = None,
+    create_only: bool = False,
 ) -> List[str]:
-    """Arguments for `wslc run` creating one container of a service."""
+    """Arguments for `wslc run` or `wslc create` for one service container."""
     mapper = path_mapper or (lambda p: p)
-    args: List[str] = ["run"]
-    if detach:
+    args: List[str] = ["create" if create_only else "run"]
+    if detach and not create_only:
         args.append("-d")
+    if remove and not create_only:
+        args.append("--rm")
 
-    args += ["--name", project.container_name(service, index)]
+    args += ["--name", container_name or project.container_name(service, index)]
     args += ["-l", f"{LABEL_PROJECT}={project.name}"]
     args += ["-l", f"{LABEL_SERVICE}={service.name}"]
     args += ["-l", f"{LABEL_INDEX}={index}"]
@@ -35,20 +44,27 @@ def run_args(
     for key, value in service.environment.items():
         args += ["-e", key if value is None else f"{key}={value}"]
 
-    for port in service.ports:
-        args += ["-p", port.to_flag()]
+    if include_ports:
+        for port in service.ports:
+            args += ["-p", port.to_flag()]
 
     for mount in service.volumes:
         if mount.type == "tmpfs":
             args += ["--tmpfs", mount.target]
             continue
         source = mount.source or ""
+        if mount.anonymous:
+            source = f"{source}-{anonymous_volume_suffix or index}"
         if mount.type == "bind":
             source = mapper(source)
         spec = f"{source}:{mount.target}"
         if mount.read_only:
             spec += ":ro"
         args += ["-v", spec]
+    for secret in service.secrets:
+        args += ["-v", f"{mapper(secret.file)}:{secret.target}:ro"]
+    for config in service.configs:
+        args += ["-v", f"{mapper(config.file)}:{config.target}:ro"]
     for target in service.tmpfs:
         args += ["--tmpfs", target]
 
@@ -91,13 +107,13 @@ def run_args(
     if service.tty:
         args.append("-t")
 
-    entrypoint = service.entrypoint or []
+    entrypoint = entrypoint_override if entrypoint_override is not None else (service.entrypoint or [])
     if entrypoint:
         args += ["--entrypoint", entrypoint[0]]
 
     args.append(image_name(project, service))
     args += entrypoint[1:]
-    args += service.command or []
+    args += command_override if command_override is not None else (service.command or [])
     return args
 
 
