@@ -130,6 +130,7 @@ class Service:
     replicas: int = 1
     profiles: List[str] = field(default_factory=list)
     restart: Optional[str] = None  # accepted but not enforceable by wslc yet
+    pull_policy: Optional[str] = None
 
     def config_hash(self) -> str:
         blob = json.dumps(self, default=lambda o: o.__dict__, sort_keys=True)

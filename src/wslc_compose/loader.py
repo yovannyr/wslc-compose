@@ -819,6 +819,14 @@ def load_project(
         svc.tty = bool(cfg.get("tty", False))
         svc.profiles = _as_list(cfg.get("profiles"))
         svc.restart = cfg.get("restart")
+        svc.pull_policy = cfg.get("pull_policy")
+        if svc.pull_policy not in (None, "always", "never", "missing", "if_not_present", "build"):
+            raise ComposeError(
+                f"{svc_name}: invalid pull_policy {svc.pull_policy!r}; expected "
+                "always, never, missing, or build"
+            )
+        if svc.pull_policy == "if_not_present":
+            svc.pull_policy = "missing"
         if svc.restart and svc.restart not in ("no", '"no"'):
             detail = (
                 f"{svc_name}: restart policies are not supported by wslc "

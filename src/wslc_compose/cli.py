@@ -144,6 +144,72 @@ def _print_table(rows: List[List[str]], headers: List[str]) -> None:
 # --- commands ----------------------------------------------------------------
 
 
+def _uses_latest_tag(image: Optional[str]) -> bool:
+    if not image or "@" in image:
+        return False
+    last_component = image.rsplit("/", 1)[-1]
+    return ":" not in last_component or last_component.endswith(":latest")
+
+
+def _prepare_service_image(
+    project: Project,
+    service: Service,
+    *,
+    build: bool = False,
+    no_build: bool = False,
+    pull: Optional[str] = None,
+    no_cache: bool = False,
+    dry_run: bool = False,
+) -> None:
+    if build and no_build:
+        raise ComposeError("--build and --no-build cannot be used together")
+    policy = pull or service.pull_policy or "missing"
+    image = flags.image_name(project, service)
+    exists = engine.image_exists(image)
+
+    should_pull = bool(service.image) and (
+        policy == "always" or (policy == "missing" and exists and _uses_latest_tag(service.image))
+    )
+    if should_pull:
+        _info(f"Pulling {service.name} ...")
+        engine.run(["pull", service.image], dry_run=dry_run)
+        exists = True
+
+    should_build = bool(service.build) and (build or policy == "build")
+    if should_build:
+        if no_build:
+            raise ComposeError(f"{service.name}: image build is disabled by --no-build")
+        _info(f"Building {service.name} ...")
+        engine.run(
+            flags.build_args(
+                project,
+                service,
+                no_cache=no_cache,
+                path_mapper=engine.to_host_path,
+            ),
+            dry_run=dry_run,
+        )
+        return
+
+    if exists:
+        return
+    if service.build and not no_build:
+        _info(f"Building {service.name} ...")
+        engine.run(
+            flags.build_args(project, service, path_mapper=engine.to_host_path),
+            dry_run=dry_run,
+        )
+    elif service.build and no_build:
+        raise ComposeError(
+            f"{service.name}: image {image!r} is missing and image build is disabled"
+        )
+    elif policy == "never":
+        raise ComposeError(f"{service.name}: image {image!r} is missing and pull_policy is never")
+    elif service.image:
+        _info(f"Pulling {service.name} ...")
+        engine.run(["pull", service.image], dry_run=dry_run)
+
+
 def _wait_for_container_health(
     container_name: str,
     service: Service,
@@ -254,13 +320,9 @@ def cmd_up(ns: argparse.Namespace) -> int:
             _info(f"Volume {vol.name} created")
 
     for svc in services:
-        # build when explicitly asked, or when the target image is absent
-        if svc.build and (ns.build or not engine.image_exists(flags.image_name(project, svc))):
-            _info(f"Building {svc.name} ...")
-            engine.run(
-                flags.build_args(project, svc, path_mapper=engine.to_host_path),
-                dry_run=ns.dry_run,
-            )
+        _prepare_service_image(
+            project, svc, build=ns.build, no_build=ns.no_build, pull=ns.pull, dry_run=ns.dry_run
+        )
 
     existing = {c["name"]: c for c in _project_containers(project)} if not ns.dry_run else {}
     started: List[str] = []
@@ -596,6 +658,8 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("services", nargs="*")
     p.add_argument("-d", "--detach", action="store_true")
     p.add_argument("--build", action="store_true", help="rebuild images before starting")
+    p.add_argument("--no-build", action="store_true", help="never build service images")
+    p.add_argument("--pull", choices=("always", "missing", "never"))
     p.add_argument("--force-recreate", action="store_true")
     p.add_argument("--scale", action="append", metavar="SERVICE=N")
     p.add_argument("--wait", action="store_true", help="wait for services to be ready")
