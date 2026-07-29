@@ -185,6 +185,7 @@ Create networks and volumes, build missing images, then create/start containers 
 | `--wait-timeout SEC` | global readiness timeout (default 60) |
 | `--force-recreate` | recreate containers even if their configuration is unchanged |
 | `--scale SERVICE=N` | override the number of replicas (repeatable) |
+| `--remove-orphans` | remove project containers whose service is no longer declared |
 | `-t, --timeout SEC` | stop timeout when recreating (default 10) |
 
 Without `-d`, logs of the started services are followed after startup; `Ctrl+C`
@@ -197,6 +198,7 @@ Stop and remove all of the project's containers, then remove its non-external ne
 | Option | Description |
 |---|---|
 | `-v, --volumes` | also remove non-external named and generated anonymous volumes |
+| `--remove-orphans` | also remove containers for services no longer in the model |
 | `-t, --timeout SEC` | stop timeout (default 10) |
 
 ### `ps [SERVICE...]`
@@ -583,6 +585,12 @@ created or started, while `pre_stop` runs immediately before a running container
 stopped by `stop`, `restart`, or `down`. Hook `command`, `user`, `working_dir`, and
 `environment` are supported. Hook failures abort the operation; `privileged: true`
 is rejected because wslc cannot execute privileged commands.
+
+`up` and `down` warn when labeled project containers refer to services that are no
+longer declared. They are preserved unless `--remove-orphans` is supplied. If `up`
+fails partway through reconciliation, container instances created or recreated by
+that invocation are removed in reverse creation order; untouched pre-existing
+containers are never included in this rollback set.
 
 ## Networking
 

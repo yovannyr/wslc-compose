@@ -309,6 +309,23 @@ def _run_lifecycle_hooks(
 
 
 def cmd_up(ns: argparse.Namespace) -> int:
+    ns._created_containers = []
+    try:
+        return _cmd_up(ns)
+    except Exception:
+        if not ns.dry_run:
+            for container_name in reversed(ns._created_containers):
+                _err(f"rolling back container {container_name}")
+                try:
+                    engine.run(
+                        ["remove", "-f", container_name], capture=True, check=False
+                    )
+                except WslcError as exc:
+                    _err(f"warning: could not roll back {container_name}: {exc}")
+        raise
+
+
+def _cmd_up(ns: argparse.Namespace) -> int:
     project = _load(ns)
     services = _select_services(project, ns.services, ns.profile)
     if not services:
@@ -361,7 +378,24 @@ def cmd_up(ns: argparse.Namespace) -> int:
             project, svc, build=ns.build, no_build=ns.no_build, pull=ns.pull, dry_run=ns.dry_run
         )
 
-    existing = {c["name"]: c for c in _project_containers(project)} if not ns.dry_run else {}
+    existing_entries = _project_containers(project) if not ns.dry_run else []
+    orphans = [
+        entry for entry in existing_entries if entry["service"] not in project.services
+    ]
+    if orphans and getattr(ns, "remove_orphans", False):
+        for entry in orphans:
+            _info(f"Removing orphan container {entry['name']} ...")
+            engine.run(
+                ["remove", "-f", entry["name"]], capture=True, dry_run=ns.dry_run
+            )
+    elif orphans:
+        names = ", ".join(sorted(entry["name"] for entry in orphans))
+        _err(f"warning: found orphan containers: {names}; use --remove-orphans")
+    existing = {
+        entry["name"]: entry
+        for entry in existing_entries
+        if entry["service"] in project.services
+    }
     started: List[str] = []
     ready_dependencies = set()
 
@@ -425,6 +459,7 @@ def cmd_up(ns: argparse.Namespace) -> int:
                 ),
                 dry_run=ns.dry_run,
             )
+            ns._created_containers.append(cname)
             started.append(cname)
             _run_lifecycle_hooks(cname, svc.post_start, "post_start", ns.dry_run)
 
@@ -570,6 +605,13 @@ def cmd_run(ns: argparse.Namespace) -> int:
 def cmd_down(ns: argparse.Namespace) -> int:
     project = _load(ns)
     containers = _project_containers(project)
+    orphans = [entry for entry in containers if entry["service"] not in project.services]
+    if orphans and not getattr(ns, "remove_orphans", False):
+        names = ", ".join(sorted(entry["name"] for entry in orphans))
+        _err(f"warning: found orphan containers: {names}; use --remove-orphans")
+        containers = [
+            entry for entry in containers if entry["service"] in project.services
+        ]
     for entry in _ordered_containers(project, containers, reverse=True):
         if entry["running"]:
             service = project.services.get(entry["service"])
@@ -1000,11 +1042,13 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--scale", action="append", metavar="SERVICE=N")
     p.add_argument("--wait", action="store_true", help="wait for services to be ready")
     p.add_argument("--wait-timeout", type=float, default=60.0, metavar="SECONDS")
+    p.add_argument("--remove-orphans", action="store_true")
     p.add_argument("-t", "--timeout", type=int, default=10)
     p.set_defaults(func=cmd_up)
 
     p = sub.add_parser("down", help="stop and remove project containers and networks")
     p.add_argument("-v", "--volumes", action="store_true", help="also remove named volumes")
+    p.add_argument("--remove-orphans", action="store_true")
     p.add_argument("-t", "--timeout", type=int, default=10)
     p.set_defaults(func=cmd_down)
 
