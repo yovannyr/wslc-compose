@@ -100,3 +100,79 @@ def test_healthcheck_test_is_replaced_instead_of_appended():
     )
 
     assert merged["services"]["app"]["healthcheck"]["test"] == ["CMD", "override"]
+
+
+def test_reset_tag_clears_inherited_sequences_and_mappings(tmp_path):
+    base = tmp_path / "compose.yaml"
+    override = tmp_path / "compose.override.yaml"
+    base.write_text(
+        """
+services:
+  app:
+    image: app
+    environment: {KEEP: no}
+    ports: ["8080:80"]
+"""
+    )
+    override.write_text(
+        """
+services:
+  app:
+    environment: !reset null
+    ports: !reset []
+"""
+    )
+
+    service = load_project([str(base), str(override)]).services["app"]
+
+    assert service.environment == {}
+    assert service.ports == []
+
+
+def test_override_tag_bypasses_unique_resource_merge(tmp_path):
+    base = tmp_path / "compose.yaml"
+    override = tmp_path / "compose.override.yaml"
+    base.write_text(
+        """
+services:
+  app:
+    image: app
+    ports: ["8080:80", "8081:81"]
+"""
+    )
+    override.write_text(
+        """
+services:
+  app:
+    ports: !override ["9090:90"]
+"""
+    )
+
+    service = load_project([str(base), str(override)]).services["app"]
+
+    assert [port.to_flag() for port in service.ports] == ["9090:90"]
+
+
+def test_tagged_values_are_interpolated(tmp_path, monkeypatch):
+    base = tmp_path / "compose.yaml"
+    override = tmp_path / "compose.override.yaml"
+    base.write_text(
+        """
+services:
+  app:
+    image: app
+    command: [base]
+"""
+    )
+    override.write_text(
+        """
+services:
+  app:
+    command: !override [echo, "${MESSAGE}"]
+"""
+    )
+    monkeypatch.setenv("MESSAGE", "ready")
+
+    service = load_project([str(base), str(override)]).services["app"]
+
+    assert service.command == ["echo", "ready"]

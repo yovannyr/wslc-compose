@@ -66,6 +66,55 @@ class ComposeError(ValueError):
     pass
 
 
+class _TaggedValue:
+    def __init__(self, value: Any):
+        self.value = value
+
+
+class _ResetValue(_TaggedValue):
+    pass
+
+
+class _OverrideValue(_TaggedValue):
+    pass
+
+
+class _ComposeLoader(yaml.SafeLoader):
+    pass
+
+
+def _construct_tagged(loader, node, wrapper):
+    if isinstance(node, yaml.ScalarNode):
+        value = loader.construct_scalar(node)
+        if node.tag.endswith(":null") or value in ("null", "~"):
+            value = None
+    elif isinstance(node, yaml.SequenceNode):
+        value = loader.construct_sequence(node, deep=True)
+    else:
+        value = loader.construct_mapping(node, deep=True)
+    return wrapper(value)
+
+
+_ComposeLoader.add_constructor(
+    "!reset", lambda loader, node: _construct_tagged(loader, node, _ResetValue)
+)
+_ComposeLoader.add_constructor(
+    "!override", lambda loader, node: _construct_tagged(loader, node, _OverrideValue)
+)
+
+def _interpolate_compose_tree(node: Any, env: Dict[str, str]) -> Any:
+    if isinstance(node, _TaggedValue):
+        return type(node)(_interpolate_compose_tree(node.value, env))
+    if isinstance(node, list):
+        return [_interpolate_compose_tree(value, env) for value in node]
+    if isinstance(node, dict):
+        return {
+            key: _interpolate_compose_tree(value, env) for key, value in node.items()
+        }
+    return interpolate_tree(node, env)
+
+
+
 def _unique_resource_key(kind: str, item: Any) -> Optional[Tuple[Any, ...]]:
     """Return the Compose uniqueness key for mergeable service resources."""
     if kind == "volumes":
@@ -91,6 +140,17 @@ def _unique_resource_key(kind: str, item: Any) -> Optional[Tuple[Any, ...]]:
 
 def merge_compose_models(base: Any, override: Any, path: Tuple[str, ...] = ()) -> Any:
     """Merge two interpolated Compose models using specification-aware rules."""
+    if isinstance(override, _OverrideValue):
+        return copy.deepcopy(override.value)
+    if isinstance(override, _ResetValue):
+        if override.value is not None:
+            return copy.deepcopy(override.value)
+        if isinstance(base, list):
+            return []
+        if isinstance(base, dict):
+            return {}
+        return None
+
     if path and path[-1] in ("command", "entrypoint"):
         return copy.deepcopy(override)
     if len(path) >= 2 and path[-2:] == ("healthcheck", "test"):
@@ -103,7 +163,7 @@ def merge_compose_models(base: Any, override: Any, path: Tuple[str, ...] = ()) -
             if key in result:
                 result[key] = merge_compose_models(result[key], value, path + (key,))
             else:
-                result[key] = copy.deepcopy(value)
+                result[key] = merge_compose_models(None, value, path + (key,))
         return result
 
     if isinstance(base, list) and isinstance(override, list):
@@ -151,10 +211,17 @@ def _absolutize_document_paths(document: Dict[str, Any], project_dir: str) -> No
         env_file = service.get("env_file")
         if isinstance(env_file, str):
             service["env_file"] = _resolve_bind_source(env_file, project_dir)
+        elif isinstance(env_file, dict):
+            env_file["path"] = _resolve_bind_source(str(env_file["path"]), project_dir)
         elif isinstance(env_file, list):
-            service["env_file"] = [
-                _resolve_bind_source(str(path), project_dir) for path in env_file
-            ]
+            resolved_env_files = []
+            for item in env_file:
+                if isinstance(item, dict):
+                    item["path"] = _resolve_bind_source(str(item["path"]), project_dir)
+                    resolved_env_files.append(item)
+                else:
+                    resolved_env_files.append(_resolve_bind_source(str(item), project_dir))
+            service["env_file"] = resolved_env_files
         volumes = []
         for volume in service.get("volumes") or []:
             if isinstance(volume, dict):
@@ -185,12 +252,12 @@ def _load_compose_document(
         raise ComposeError("circular include: " + " -> ".join(stack + [path]))
     stack.append(path)
     with open(path, encoding="utf-8") as fh:
-        document = yaml.safe_load(fh)
+        document = yaml.load(fh, Loader=_ComposeLoader)
     if document is None:
         document = {}
     if not isinstance(document, dict):
         raise ComposeError(f"{path}: expected a mapping at the document root")
-    document = interpolate_tree(document, env)
+    document = _interpolate_compose_tree(document, env)
 
     includes = document.pop("include", [])
     if isinstance(includes, (str, dict)):
@@ -841,6 +908,38 @@ def _parse_build(value, project_dir: str, service_name: str) -> BuildConfig:
     )
 
 
+
+def _parse_env_files(value: Any, project_dir: str, service_name: str) -> List[str]:
+    if value is None:
+        return []
+    items = value if isinstance(value, list) else [value]
+    result = []
+    for index, item in enumerate(items):
+        if isinstance(item, str):
+            path = item
+            required = True
+        elif isinstance(item, dict) and item.get("path"):
+            path = str(item["path"])
+            required = bool(item.get("required", True))
+            env_format = item.get("format", "compose")
+            if env_format not in ("compose", "raw"):
+                raise ComposeError(
+                    f"{service_name}: env_file[{index}].format must be compose or raw"
+                )
+        else:
+            raise ComposeError(
+                f"{service_name}: env_file[{index}] must be a path or mapping"
+            )
+        resolved = os.path.abspath(path if os.path.isabs(path) else os.path.join(project_dir, path))
+        if not os.path.isfile(resolved):
+            if required:
+                raise ComposeError(
+                    f"{service_name}: required env_file not found: {resolved}"
+                )
+            continue
+        result.append(resolved)
+    return result
+
 def load_project(
     compose_file: Sequence[str],
     project_name: Optional[str] = None,
@@ -931,10 +1030,9 @@ def load_project(
         svc.entrypoint = _as_command(cfg.get("entrypoint"))
         svc.container_name = cfg.get("container_name")
         svc.environment = _as_environment(cfg.get("environment"))
-        svc.env_files = [
-            f if os.path.isabs(f) else os.path.join(project_dir, f)
-            for f in _as_list(cfg.get("env_file"))
-        ]
+        svc.env_files = _parse_env_files(
+            cfg.get("env_file"), project_dir, str(svc_name)
+        )
         for spec in cfg.get("ports") or []:
             svc.ports.extend(parse_port(spec))
         for spec in cfg.get("volumes") or []:

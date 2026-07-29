@@ -372,6 +372,17 @@ override of the same container target replaces the original resource. Other list
 are appended. Relative paths in an `-f` stack are resolved from the first file's
 project directory.
 
+Compose's YAML merge tags are supported. `!reset` clears an inherited value before
+normalization, while `!override` replaces it without applying normal merge rules:
+
+```yaml
+services:
+  api:
+    ports: !override ["9090:90"]
+    environment: !reset null
+```
+
+
 ### `include`
 
 Included Compose applications contribute services and top-level resources:
@@ -438,6 +449,21 @@ Identical to docker compose:
 
 Precedence: process environment > `.env` file (in the project directory, or
 `--env-file`). Shell constructs like `$(date)` are left untouched.
+
+Service `env_file` supports both short syntax and Compose long syntax:
+
+```yaml
+services:
+  api:
+    env_file:
+      - path: ./defaults.env
+        required: false
+      - path: ./credentials.env
+        format: raw
+```
+
+Missing optional files are skipped; missing required files fail during model loading.
+`format: raw` preserves `$` and quote characters without Compose-side interpretation.
 
 ## Readiness and dependency conditions
 
