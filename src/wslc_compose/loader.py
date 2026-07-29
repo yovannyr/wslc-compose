@@ -814,6 +814,10 @@ def load_project(
         svc.working_dir = cfg.get("working_dir")
         svc.labels = _as_mapping(cfg.get("labels"), "labels")
         svc.stop_signal = cfg.get("stop_signal")
+        if cfg.get("stop_grace_period") is not None:
+            svc.stop_grace_period = parse_duration(
+                cfg["stop_grace_period"], f"{svc_name}.stop_grace_period"
+            )
         svc.shm_size = str(cfg["shm_size"]) if cfg.get("shm_size") is not None else None
         svc.stdin_open = bool(cfg.get("stdin_open", False))
         svc.tty = bool(cfg.get("tty", False))

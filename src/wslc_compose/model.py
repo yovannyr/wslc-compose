@@ -124,6 +124,7 @@ class Service:
     shm_size: Optional[str] = None
     ulimits: List[str] = field(default_factory=list)
     stop_signal: Optional[str] = None
+    stop_grace_period: Optional[float] = None
     gpus: Optional[str] = None
     stdin_open: bool = False
     tty: bool = False

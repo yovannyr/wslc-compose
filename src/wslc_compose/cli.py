@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import argparse
 import dataclasses
+import math
 import os
 import shlex
 import signal
@@ -376,7 +377,7 @@ def cmd_up(ns: argparse.Namespace) -> int:
                 _info(f"Recreating {cname} ...")
                 if current["running"]:
                     engine.run(
-                        ["stop", "-t", str(ns.timeout), cname], capture=True, dry_run=ns.dry_run
+                        ["stop", "-t", str(_stop_timeout(project, svc.name, ns.timeout)), cname], capture=True, dry_run=ns.dry_run
                     )
                 engine.run(["remove", "-f", cname], capture=True, dry_run=ns.dry_run)
             else:
@@ -407,6 +408,31 @@ def cmd_up(ns: argparse.Namespace) -> int:
         return 0
     _info("Attaching to logs (Ctrl+C to detach; containers keep running)")
     return _follow_logs(project, service_names=[s.name for s in services], follow=True)
+
+
+def _stop_timeout(project: Project, service_name: str, fallback: int) -> int:
+    service = project.services.get(service_name)
+    if service is None or service.stop_grace_period is None:
+        return fallback
+    return max(0, math.ceil(service.stop_grace_period))
+
+
+def _ordered_containers(
+    project: Project, containers: List[dict], reverse: bool = False
+) -> List[dict]:
+    by_service = {}
+    for entry in containers:
+        by_service.setdefault(entry["service"], []).append(entry)
+    services = project.sorted_services()
+    if reverse:
+        services = list(reversed(services))
+    ordered = []
+    for service in services:
+        entries = by_service.pop(service.name, [])
+        ordered.extend(sorted(entries, key=lambda item: item["index"], reverse=reverse))
+    for entries in by_service.values():
+        ordered.extend(entries)
+    return ordered
 
 
 def _ensure_service_resources(project: Project, service: Service, dry_run: bool) -> None:
@@ -497,11 +523,11 @@ def cmd_run(ns: argparse.Namespace) -> int:
 def cmd_down(ns: argparse.Namespace) -> int:
     project = _load(ns)
     containers = _project_containers(project)
-    for entry in containers:
+    for entry in _ordered_containers(project, containers, reverse=True):
         if entry["running"]:
             _info(f"Stopping {entry['name']} ...")
             engine.run(
-                ["stop", "-t", str(ns.timeout), entry["name"]], capture=True, dry_run=ns.dry_run
+                ["stop", "-t", str(_stop_timeout(project, entry["service"], ns.timeout)), entry["name"]], capture=True, dry_run=ns.dry_run
             )
         _info(f"Removing {entry['name']} ...")
         engine.run(["remove", "-f", entry["name"]], capture=True, dry_run=ns.dry_run)
@@ -644,13 +670,23 @@ def _lifecycle(ns: argparse.Namespace, action: str) -> int:
     if not containers:
         _err("no containers found")
         return 1
-    for entry in containers:
-        if action in ("stop", "restart") and entry["running"]:
+    if action in ("stop", "restart"):
+        for entry in _ordered_containers(project, containers, reverse=True):
+            if not entry["running"]:
+                continue
             _info(f"Stopping {entry['name']} ...")
             engine.run(
-                ["stop", "-t", str(ns.timeout), entry["name"]], capture=True, dry_run=ns.dry_run
+                [
+                    "stop",
+                    "-t",
+                    str(_stop_timeout(project, entry["service"], ns.timeout)),
+                    entry["name"],
+                ],
+                capture=True,
+                dry_run=ns.dry_run,
             )
-        if action in ("start", "restart"):
+    if action in ("start", "restart"):
+        for entry in _ordered_containers(project, containers):
             _info(f"Starting {entry['name']} ...")
             engine.run_retried(["start", entry["name"]], dry_run=ns.dry_run)
     return 0
