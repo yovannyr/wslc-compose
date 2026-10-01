@@ -3,14 +3,21 @@
 param(
     [string]$Source = $PSScriptRoot,
     [string]$Python = 'python',
-    [string]$InstallDirectory = (Join-Path $env:LOCALAPPDATA 'wslc-compose\venv'),
+    # Packaged hosts can virtualize LOCALAPPDATA. Use a user-home directory
+    # so Python launchers and profile paths work outside the installing app.
+    [string]$InstallDirectory = (Join-Path $env:USERPROFILE '.wslc-compose\venv'),
     [string]$ProfilePath = $PROFILE.CurrentUserAllHosts,
     [switch]$SkipPackageInstall,
     [string]$WrapperPath,
+    [switch]$EnableCmd,
+    [string]$CmdRegistryPath = 'HKCU:\Software\Microsoft\Command Processor',
     [switch]$Uninstall
 )
 
 $ErrorActionPreference = 'Stop'
+if ($EnableCmd) {
+    . (Join-Path $PSScriptRoot 'scripts\cmd-integration.ps1')
+}
 $startMarker = '# >>> wslc-compose >>>'
 $endMarker = '# <<< wslc-compose <<<'
 $blockPattern = '(?ms)\r?\n# >>> wslc-compose >>>\r?\n.*?^# <<< wslc-compose <<<\r?\n'
@@ -36,6 +43,9 @@ if (!$Uninstall -and $unmanagedText -match
 }
 
 if ($Uninstall) {
+    if ($EnableCmd) {
+        Update-WslcCmdIntegration -RegistryPath $CmdRegistryPath -Remove
+    }
     $updatedText = $unmanagedText
 } else {
     if (!$SkipPackageInstall) {
@@ -71,6 +81,9 @@ $endMarker
     $parseErrors = $null
     [void][Management.Automation.Language.Parser]::ParseInput($updatedText, [ref]$tokens, [ref]$parseErrors)
     if ($parseErrors.Count) { throw 'Profile has syntax errors. Profile left unchanged.' }
+    if ($EnableCmd) {
+        Update-WslcCmdIntegration -RegistryPath $CmdRegistryPath -WrapperDirectory (Split-Path -Parent $WrapperPath)
+    }
 }
 if ($updatedText -ne $profileText) {
     if (Test-Path -LiteralPath $ProfilePath) {
@@ -89,4 +102,8 @@ if ($Uninstall) {
     Write-Host 'Open a new PowerShell terminal, or reload this profile:'
     Write-Host ". '$($ProfilePath.Replace("'", "''"))'"
     Write-Host 'Try: wslc compose version; wslc list'
+}
+if ($EnableCmd) {
+    if ($Uninstall) { Write-Host 'CMD integration removed.' }
+    else { Write-Host 'CMD integration installed. Open a new cmd.exe window (without /d).' }
 }

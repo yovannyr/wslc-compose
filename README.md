@@ -112,7 +112,7 @@ From a local checkout, run:
 ```
 
 The installer uses Python's `venv` and `pip` (no uv or administrator privileges
-required), installs into `%LOCALAPPDATA%\wslc-compose\venv`, and adds `wslc` and
+required), installs into `%USERPROFILE%\.wslc-compose\venv`, and adds `wslc` and
 `wslc-compose` forwarding functions to the current user's all-hosts PowerShell
 profile. `wslc compose ...` uses the wrapper, while other `wslc` commands go to
 Microsoft's native CLI. No system PATH changes are made.
@@ -153,6 +153,44 @@ backups are retained; reopen terminals afterwards):
 Use `-ProfilePath` for a custom profile or `-InstallDirectory` for a custom
 virtual environment. A plain `pip install .` still installs the executables but
 does not automatically configure PowerShell.
+
+The default environment is deliberately outside AppData: packaged applications
+can redirect AppData writes to an app-private location, leaving profile paths
+unusable in ordinary terminals. To repair an older installation affected by this,
+rerun the current installer in each PowerShell edition you use, then reopen the
+terminal. The existing managed profile block is replaced and backed up.
+
+### Permanent Windows Command Prompt (cmd.exe) integration
+
+Enable this optional integration from PowerShell:
+
+```powershell
+.\install.ps1 -EnableCmd
+# Or reuse the already installed wrapper:
+.\install.ps1 -EnableCmd -SkipPackageInstall -WrapperPath "$env:USERPROFILE\.wslc-compose\venv\Scripts\wslc.exe"
+```
+
+New `cmd.exe` windows then recognize `wslc compose version` and other Compose
+commands. The installer appends a PATH-prepending command to the current user's
+`HKCU\Software\Microsoft\Command Processor\AutoRun`; Microsoft's executable and
+the persistent system/user PATH are unchanged. Existing AutoRun commands and
+their registry value type are preserved. The original value is saved in
+`WslcComposeIntegration` in the same key; repeated installs replace only the
+managed suffix. If another program changes that suffix, the installer stops
+instead of overwriting the external change.
+
+Remove both the selected PowerShell profile integration and CMD integration with:
+
+```powershell
+.\install.ps1 -Uninstall -EnableCmd
+```
+
+The previous AutoRun value is restored (or removed if none existed). Other
+PowerShell editions' profiles and the installed package are retained. CMD
+windows already open must be restarted. `cmd /d` disables AutoRun, so this
+integration is unavailable there. Wrapper paths containing `%`, `!`, quotes
+or newlines are rejected to prevent CMD expansion errors. When downloading
+the installer separately, also obtain `scripts/cmd-integration.ps1` beside it.
 
 ### One-liner (recommended)
 
