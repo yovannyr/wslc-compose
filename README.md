@@ -76,12 +76,83 @@ Two executables are installed:
 
 ## Requirements
 
+Container and image queries support both the older preview JSON arrays and
+WSL 3.0.1's JSON-lines output, including its Docker-style container names and
+port mappings. After updating WSL, reinstall the current checkout to obtain
+these compatibility fixes. If `wslc compose` reports an unknown command,
+Windows may be finding Microsoft's native `wslc.exe` before the installed
+wrapper; use `wslc-compose` directly or put the wrapper's directory first in PATH.
+
+For a live compatibility check with locally available WslcShop images, run
+from the repository root (the override uses separate ports and project volumes):
+
+```powershell
+wslc-compose -p wslc-compat-smoke -f examples/WslcShop/compose.yaml -f tests/fixtures/wsl3-shop.override.yaml up -d --no-build --pull never
+wslc-compose -p wslc-compat-smoke -f examples/WslcShop/compose.yaml -f tests/fixtures/wsl3-shop.override.yaml ps
+Invoke-WebRequest http://127.0.0.1:18088/health/ready
+# Remove only this test project's containers, network and test data:
+wslc-compose -p wslc-compat-smoke -f examples/WslcShop/compose.yaml -f tests/fixtures/wsl3-shop.override.yaml down -v
+```
+
 - **Windows 11** with the **WSL container preview** installed — `wslc` must work in a
   terminal. See the [official documentation](https://learn.microsoft.com/windows/wsl/wsl-container).
 - **Python ≥ 3.9**, inside a WSL distro or on Windows.
   (No pip/venv on your distro? The installer below handles that.)
 
 ## Installation
+
+### Windows PowerShell (recommended on Windows)
+
+From a local checkout, run:
+
+```powershell
+.\install.ps1
+# Select a specific Python installation if necessary:
+.\install.ps1 -Python 'C:\Path\To\python.exe'
+```
+
+The installer uses Python's `venv` and `pip` (no uv or administrator privileges
+required), installs into `%LOCALAPPDATA%\wslc-compose\venv`, and adds `wslc` and
+`wslc-compose` forwarding functions to the current user's all-hosts PowerShell
+profile. `wslc compose ...` uses the wrapper, while other `wslc` commands go to
+Microsoft's native CLI. No system PATH changes are made.
+
+Open a new PowerShell terminal after installation. To activate the functions in
+the current terminal, run `. $PROFILE.CurrentUserAllHosts`. VS Code terminals
+using the same PowerShell edition also load this profile. PowerShell 7 and
+Windows PowerShell 5.1 have separate profiles: run the installer in each edition
+you use. Sessions started with `-NoProfile` and cmd.exe do not load these functions.
+
+Updates use the same installer command. Existing profile settings are preserved;
+each changed profile is backed up, and reruns do not duplicate the managed block.
+An existing unmanaged `wslc` function/alias or invalid profile causes installation
+to stop instead of overwriting it. Profile execution must be allowed by your
+existing execution policy; the installer does not bypass company policies.
+
+To install directly from GitHub using a downloaded copy of this installer (Git
+must be available for pip's Git source):
+
+```powershell
+.\install.ps1 -Source 'git+https://github.com/yovannyr/wslc-compose'
+```
+
+To reuse a package installed with pip/uv instead of installing another copy:
+
+```powershell
+.\install.ps1 -SkipPackageInstall -WrapperPath "$env:USERPROFILE\.local\bin\wslc.exe"
+```
+
+`-WrapperPath` must point to this project's wrapper, not Microsoft's executable.
+To remove only the managed PowerShell integration (the package and profile
+backups are retained; reopen terminals afterwards):
+
+```powershell
+.\install.ps1 -Uninstall
+```
+
+Use `-ProfilePath` for a custom profile or `-InstallDirectory` for a custom
+virtual environment. A plain `pip install .` still installs the executables but
+does not automatically configure PowerShell.
 
 ### One-liner (recommended)
 
@@ -117,8 +188,8 @@ WSLC_COMPOSE_SOURCE=$PWD sh install.sh     # or: pip install -e .
 `wslc-compose` finds the wslc CLI automatically, in this order:
 
 1. `$WSLC_COMPOSE_BIN` (explicit override)
-2. `wslc.exe` / `wslc` on `PATH` (Windows interop makes `wslc.exe` visible inside WSL)
-3. `C:\Program Files\WSL\wslc.exe` (default install location)
+2. `C:\Program Files\WSL\wslc.exe` (or its `/mnt/c` equivalent inside WSL)
+3. `wslc.exe` / `wslc` on `PATH` if no native installation was found
 
 ## Quick start
 

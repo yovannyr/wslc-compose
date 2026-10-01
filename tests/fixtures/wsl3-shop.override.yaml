@@ -1,0 +1,14 @@
+# Optional live smoke test against examples/WslcShop/compose.yaml.
+# Use -p wslc-compat-smoke and --no-build --pull never to reuse local images
+# without touching the regular shop's volumes or published ports.
+services:
+  api:
+    image: wslc-shop-api:latest
+    ports: !override
+      - "127.0.0.1:18088:8080"
+  postgres:
+    ports: !override
+      - "127.0.0.1:15433:5432"
+  redis:
+    ports: !override
+      - "127.0.0.1:16379:6379"

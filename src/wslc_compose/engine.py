@@ -39,12 +39,15 @@ def find_wslc() -> str:
     override = os.environ.get("WSLC_COMPOSE_BIN")
     if override:
         return override
+    # Prefer Microsoft's known installation over PATH: uv/pip put our own
+    # wslc shim first there. Comparing argv[0] alone misses Windows launchers
+    # (which execute Python with a different argv[0]) and causes recursion.
+    for path in WSLC_FALLBACKS:
+        if os.path.isfile(path) and not _is_self(path):
+            return path
     for name in ("wslc.exe", "wslc"):
         path = shutil.which(name)
         if path and not _is_self(path):
-            return path
-    for path in WSLC_FALLBACKS:
-        if os.path.isfile(path):
             return path
     raise WslcError(
         "wslc CLI not found. Install the WSL container preview "
@@ -167,7 +170,24 @@ def capture_json(args: List[str]):
     try:
         return json.loads(text)
     except json.JSONDecodeError as exc:
-        raise WslcError(f"unexpected non-JSON output from wslc {' '.join(args)}: {exc}")
+        # WSL 3.x list commands emit one JSON object per line, while older
+        # previews and inspect emit a JSON array. Never accept a partial list.
+        try:
+            records = [json.loads(line) for line in text.splitlines() if line.strip()]
+            if records and all(isinstance(record, dict) for record in records):
+                return records
+        except json.JSONDecodeError:
+            pass
+        raise WslcError(
+            f"unexpected non-JSON output from wslc {' '.join(args)}: {exc}"
+        ) from exc
+
+
+def _json_records(result) -> List[dict]:
+    """Normalize arrays and single-record JSON list output."""
+    if isinstance(result, dict):
+        return [result]
+    return result if isinstance(result, list) else []
 
 
 # --- queries ---------------------------------------------------------------
@@ -178,7 +198,7 @@ def list_project_containers(project: str, all_states: bool = True) -> List[dict]
     if all_states:
         args.insert(1, "-a")
     result = capture_json(args)
-    return result if isinstance(result, list) else []
+    return _json_records(result)
 
 
 def inspect(object_id: str) -> Optional[dict]:
@@ -218,7 +238,7 @@ def image_exists(name: str) -> bool:
         images = capture_json(["images", "--format", "json"])
     except WslcError:
         return False
-    for img in images if isinstance(images, list) else []:
+    for img in _json_records(images):
         if img.get("Repository") == repo and (not tag or img.get("Tag") == tag):
             return True
     return False

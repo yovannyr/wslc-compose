@@ -1,8 +1,58 @@
 import argparse
 import subprocess
 
-from wslc_compose import cli
+from wslc_compose import LABEL_CONFIG_HASH, LABEL_INDEX, LABEL_SERVICE, cli
 from wslc_compose.model import Dependency, Project, Service
+
+
+def test_current_container_schema(monkeypatch):
+    monkeypatch.setattr(cli.engine, "list_project_containers", lambda _: [
+        {"ID": "abc", "Names": "demo-app-1", "Image": "app:1", "Ports": ""}
+    ])
+    inspected = []
+
+    def inspect(container_id):
+        inspected.append(container_id)
+        return {
+            "Name": "/demo-app-1",
+            "Config": {"Labels": {
+                LABEL_SERVICE: "app", LABEL_INDEX: "2", LABEL_CONFIG_HASH: "hash"
+            }},
+            "State": {"Running": True, "Status": "running", "ExitCode": 0},
+            "Ports": {"80/tcp": [{"HostIp": "127.0.0.1", "HostPort": "8080"}],
+                      "53/udp": [{"HostIp": "::", "HostPort": "5353"}],
+                      "443/tcp": None},
+        }
+
+    monkeypatch.setattr(cli.engine, "inspect", inspect)
+    entry = cli._project_containers(_project())[0]
+    assert inspected == ["abc"]
+    assert entry["name"] == "demo-app-1"
+    assert entry["service"] == "app"
+    assert entry["index"] == 2
+    assert entry["hash"] == "hash"
+    assert entry["running"]
+    assert cli._format_ports(entry["ports"]) == (
+        "127.0.0.1:8080->80/tcp, :::5353->53/udp"
+    )
+
+
+def test_legacy_container_schema(monkeypatch):
+    ports = [{"BindingAddress": "127.0.0.1", "HostPort": 8080,
+              "ContainerPort": 80, "Protocol": 6}]
+    monkeypatch.setattr(cli.engine, "list_project_containers", lambda _: [
+        {"Id": "abc", "Name": "demo-app-1", "Ports": ports}
+    ])
+    monkeypatch.setattr(cli.engine, "inspect", lambda _: {
+        "Labels": {LABEL_SERVICE: "app"},
+        "State": {"Running": False, "Status": "exited", "ExitCode": 7}
+    })
+    entry = cli._project_containers(_project())[0]
+    assert entry["id"] == "abc"
+    assert entry["service"] == "app"
+    assert entry["exit_code"] == 7
+    assert not entry["running"]
+    assert entry["ports"] == ports
 
 
 def _project():

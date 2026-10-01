@@ -107,13 +107,29 @@ def _project_containers(project: Project) -> List[dict]:
     entries = engine.list_project_containers(project.name)
     enriched = []
     for entry in entries:
-        data = engine.inspect(entry.get("Id") or entry.get("Name")) or {}
-        labels = data.get("Labels") or {}
+        container_id = entry.get("Id") or entry.get("ID")
+        name = entry.get("Name") or entry.get("Names")
+        data = engine.inspect(container_id or name) or {}
+        labels = data.get("Labels") or (data.get("Config") or {}).get("Labels") or {}
         state = data.get("State") or {}
+        ports = entry.get("Ports")
+        if not isinstance(ports, list):
+            ports = data.get("Ports") or []
+        if isinstance(ports, dict):
+            ports = [
+                {
+                    "ContainerPort": int(private.partition("/")[0]),
+                    "Protocol": private.partition("/")[2],
+                    "BindingAddress": binding.get("HostIp"),
+                    "HostPort": int(binding["HostPort"]),
+                }
+                for private, bindings in ports.items()
+                for binding in bindings or []
+            ]
         enriched.append(
             {
-                "id": entry.get("Id"),
-                "name": entry.get("Name") or data.get("Name"),
+                "id": container_id or data.get("Id"),
+                "name": (name or data.get("Name") or "").lstrip("/"),
                 "image": entry.get("Image") or data.get("Image"),
                 "service": labels.get(LABEL_SERVICE, ""),
                 "index": int(labels.get(LABEL_INDEX, "1") or 1),
@@ -121,7 +137,7 @@ def _project_containers(project: Project) -> List[dict]:
                 "running": bool(state.get("Running")),
                 "status": state.get("Status", "unknown"),
                 "exit_code": state.get("ExitCode"),
-                "ports": entry.get("Ports") or [],
+                "ports": ports,
             }
         )
     return enriched
